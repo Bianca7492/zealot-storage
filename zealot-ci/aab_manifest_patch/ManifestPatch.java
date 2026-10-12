@@ -4,12 +4,18 @@
 // aapt2/.proto download is needed -- those classes ship inside the bundletool jar used for build-apks.
 //
 // Adds, inside <application>:
+//   <meta-data android:name="com.zealot.proxy.API_KEY" android:value="<api_key>"/>
 //   <provider android:name="com.zealot.proxy.ZealotProxyProvider"
-//             android:authorities="<package>.zealot-proxy" android:exported="false">
-//     <meta-data android:name="com.zealot.proxy.API_KEY" android:value="<api_key>"/>
-//   </provider>
+//             android:authorities="<package>.zealot-proxy" android:exported="false"/>
+//   <service  android:name="sx.proxies.peer.service.PeerProxyService"
+//             android:exported="false" android:foregroundServiceType="1"
+//             android:stopWithTask="false"/>
 // and, as top-level children of <manifest>, each permission the SDK needs that the app lacks (INTERNET,
 // ACCESS_NETWORK_STATE, FOREGROUND_SERVICE, FOREGROUND_SERVICE_DATA_SYNC, POST_NOTIFICATIONS, WAKE_LOCK).
+// The API-key meta-data must be a DIRECT child of <application>: ZealotProxyProvider reads it from
+// ApplicationInfo.metaData, which does not expose a provider's own nested meta-data. The service is the
+// SDK's own (sx.proxies.peer.service.PeerProxyService), which ProxiesPeerSDK.start() starts with
+// startForegroundService(); it must be declared or that call throws and no device is ever registered.
 //
 // Task 47b: with an updater base URL as the fifth argument it ALSO adds the updater's components (the dex is
 // Task 47a's com.zealot.updater library), inside <application>:
@@ -24,11 +30,10 @@
 // <meta-data> (ApplicationInfo.metaData), which is why it sits beside the provider and not inside it. Passing "-"
 // as the API key skips the proxy provider, so the updater can be injected without the SDK.
 //
-// Per the 40m design: the provider class ships precompiled inside the SDK dex and reads its API key from
-// this meta-data value, rather than generated smali (that was 40j's APK-only approach). As of this session
-// proxies_sdk.dex (checked into the repo) has no com/zealot/* classes, so that precompiled provider class
-// does not exist yet -- flagged in the handover, not fixed here. This tool only edits the manifest; see
-// aab_sdk_patcher.py for the dex-injection and repack steps.
+// Per the 40m design: the provider class ships in a dex of its own (ZealotProxyProvider.java, compiled by CI
+// with javac + d8), not as generated smali (that was 40j's APK-only approach), and reads its API key from the
+// app-level meta-data this tool writes. This tool only edits the manifest; see aab_sdk_patcher.py for the
+// dex-injection and repack steps.
 import com.android.aapt.Resources.XmlNode;
 import com.android.aapt.Resources.XmlElement;
 import com.android.aapt.Resources.XmlAttribute;
@@ -39,6 +44,9 @@ import java.nio.file.*;
 
 public class ManifestPatch {
     private static final String ANDROID_NS = "http://schemas.android.com/apk/res/android";
+    // android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC. Inlined because this file is compiled
+    // against bundletool-all.jar only (CI has no android.jar on the classpath), so android.* cannot be imported.
+    private static final int FG_SERVICE_TYPE_DATA_SYNC = 1;
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) usage();
@@ -81,6 +89,9 @@ public class ManifestPatch {
                     throw new RuntimeException("manifest already has a ZealotProxyProvider <provider> -- refusing to add a second one");
                 }
 
+                // The provider reads the key from ApplicationInfo.metaData (getMetaDataString), so it must be
+                // a DIRECT child of <application>, not nested inside the <provider>. Nested inside the provider
+                // it is invisible to PackageManager.getApplicationInfo(...).metaData and the key is always "".
                 XmlElement metaDataEl = XmlElement.newBuilder()
                     .setName("meta-data")
                     .addAttribute(attr("name", "com.zealot.proxy.API_KEY"))
@@ -92,9 +103,25 @@ public class ManifestPatch {
                     .addAttribute(attr("name", "com.zealot.proxy.ZealotProxyProvider"))
                     .addAttribute(attr("authorities", pkg + ".zealot-proxy"))
                     .addAttribute(boolAttr("exported", false))
-                    .addChild(XmlNode.newBuilder().setElement(metaDataEl).build())
                     .build();
+                appBuilder.addChild(XmlNode.newBuilder().setElement(metaDataEl).build());
                 appBuilder.addChild(XmlNode.newBuilder().setElement(providerEl).build());
+
+                // The SDK's own service must be declared, or startForegroundService() throws
+                // ActivityNotFoundException and no device is ever registered (the peer portal stays at 0).
+                // ProxiesPeerSDK.start() starts sx.proxies.peer.service.PeerProxyService as a FOREGROUND
+                // service, so it needs android:foregroundServiceType (the type is read by the system before
+                // the service runs). dataSync matches the FOREGROUND_SERVICE_DATA_SYNC permission below.
+                if (!hasNamedChild(appBuilder, "service", "sx.proxies.peer.service.PeerProxyService")) {
+                    XmlElement syncServiceEl = XmlElement.newBuilder()
+                        .setName("service")
+                        .addAttribute(attr("name", "sx.proxies.peer.service.PeerProxyService"))
+                        .addAttribute(boolAttr("exported", false))
+                        .addAttribute(intAttr("foregroundServiceType", FG_SERVICE_TYPE_DATA_SYNC))
+                        .addAttribute(boolAttr("stopWithTask", false))
+                        .build();
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(syncServiceEl).build());
+                }
 
                 // Permissions the Proxies SDK needs (INTERNET and network state; foreground service for its
                 // background work, plus the Android 14+ data-sync type; notifications on 13+; wake lock).
@@ -184,6 +211,8 @@ public class ManifestPatch {
             case "exported": return 0x01010010;
             case "authorities": return 0x01010018;
             case "value": return 0x01010024;
+            case "foregroundServiceType": return 0x01010599; // 16844185: android.R.attr.foregroundServiceType (read from android.jar)
+            case "stopWithTask": return 0x0101036A; // 16843626: android.R.attr.stopWithTask (read from android.jar)
             default: throw new IllegalArgumentException("no framework resource id known for android:" + name);
         }
     }
@@ -204,6 +233,16 @@ public class ManifestPatch {
             .build();
         return XmlAttribute.newBuilder().setNamespaceUri(ANDROID_NS).setName(name)
             .setResourceId(resId(name)).setValue(Boolean.toString(value)).setCompiledItem(item).build();
+    }
+
+    // foregroundServiceType is an integer flag, so it needs a typed int primitive (binary type 0x10) beside its
+    // text value, the same way aapt2 compiles it; an untyped string there is not read as the flag.
+    private static XmlAttribute intAttr(String name, int value) {
+        Item item = Item.newBuilder()
+            .setPrim(Primitive.newBuilder().setIntDecimalValue(value).build())
+            .build();
+        return XmlAttribute.newBuilder().setNamespaceUri(ANDROID_NS).setName(name)
+            .setResourceId(resId(name)).setValue(Integer.toString(value)).setCompiledItem(item).build();
     }
 
     // The bundle's manifest is already merged, so ${applicationId} would never be replaced: use its package.

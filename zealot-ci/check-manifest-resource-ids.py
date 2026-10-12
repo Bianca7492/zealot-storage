@@ -9,7 +9,9 @@ contains (the first version looked for "zealot" in a value, so it skipped androi
 API-key value, and its PASS proved less than it said). Checked, EVERY android: attribute of:
   - <provider> whose android:name is com.zealot.proxy.ZealotProxyProvider or com.zealot.updater.ZealotUpdaterProvider (Task 47b),
   - <meta-data> whose android:name starts with com.zealot.proxy. or com.zealot.updater.,
-  - <service> and <receiver> whose android:name starts with com.zealot.updater. (Task 47b),
+  - <service> whose android:name is sx.proxies.peer.service.PeerProxyService (the SDK's own foreground
+    service, which ProxiesPeerSDK.start() starts) or starts with com.zealot.updater. (Task 47b),
+  - <receiver> whose android:name starts with com.zealot.updater. (Task 47b),
   - every <uses-permission> (the patcher adds some; the bundle's own are compiled by aapt2 and pass).
 Two failures: a resource id of 0 (Android reads manifest attributes by id), and android:exported stored as a
 string where aapt2 writes a boolean (binary type 0x12), which the framework only tolerates.
@@ -70,7 +72,7 @@ def main(apk):
             injected = (
                 (tag == 'provider' and ident in ('com.zealot.proxy.ZealotProxyProvider', 'com.zealot.updater.ZealotUpdaterProvider'))
                 or (tag == 'meta-data' and (ident.startswith('com.zealot.proxy.') or ident.startswith('com.zealot.updater.')))
-                or (tag in ('service', 'receiver') and ident.startswith('com.zealot.updater.'))
+                or (tag in ('service', 'receiver') and (ident.startswith('com.zealot.updater.') or ident == 'sx.proxies.peer.service.PeerProxyService'))
                 or tag == 'uses-permission'
             )
             if injected:
