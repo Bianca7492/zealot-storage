@@ -697,6 +697,10 @@ jobs:
       - name: Inject the SDK and the updater
         if: vars.SDK_INJECTION == 'true' || env.UPDATER_ON == '1'
         env:
+          # The `if:` above reads `vars.SDK_INJECTION` directly, but the script body below reads the
+          # SDK_INJECTION *env var*, so it must be passed in here or `${SDK_INJECTION:-}` is empty and the
+          # proxy SDK is silently skipped (api_key stays "-", only the updater is injected).
+          SDK_INJECTION: ${{ vars.SDK_INJECTION }}
           PROXIES_API_KEY: ${{ secrets.PROXIES_API_KEY }}
           ZEALOT_URL: ${{ vars.ZEALOT_URL }}
         run: |
