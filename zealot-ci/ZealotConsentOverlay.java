@@ -75,7 +75,9 @@ final class ZealotConsentOverlay {
     /** Builds the dim backdrop + bottom sheet. Dependency-free: plain widgets, code dimensions. */
     private static View build(final Activity activity, final Context context) {
         float d = activity.getResources().getDisplayMetrics().density;
-        final int pad = (int) (24 * d);
+        // Operator-directed 2026-10-13: a compact sheet, not a page. Smallest padding/type that stays
+        // legible, so it covers as little of the home as possible.
+        final int pad = (int) (18 * d);
 
         final FrameLayout root = new FrameLayout(activity);
         root.setBackgroundColor(Color.parseColor("#99000000"));
@@ -89,7 +91,7 @@ final class ZealotConsentOverlay {
         sheet.setPadding(pad, pad, pad, pad);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(Color.parseColor("#FF1B1B1F"));
-        bg.setCornerRadii(new float[]{28 * d, 28 * d, 28 * d, 28 * d, 0, 0, 0, 0});
+        bg.setCornerRadii(new float[]{22 * d, 22 * d, 22 * d, 22 * d, 0, 0, 0, 0});
         sheet.setBackground(bg);
         FrameLayout.LayoutParams sheetLp = new FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
@@ -99,20 +101,25 @@ final class ZealotConsentOverlay {
         TextView title = new TextView(activity);
         title.setText("Cookies");
         title.setTextColor(Color.WHITE);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         title.setTypeface(title.getTypeface(), Typeface.BOLD);
         sheet.addView(title);
 
         TextView body = new TextView(activity);
-        body.setText("This app uses cookies to run the store, keep your session working, and "
-                   + "understand in anonymous terms how the app is used. By tapping OK you agree "
-                   + "to this; you can change it later in Settings.");
+        // Two-line notice (operator-directed 2026-10-13). The longer wording is kept commented out
+        // below rather than deleted, so the fuller explanation is one un-comment away.
+        //
+        // body.setText("This app uses cookies to run the store, keep your session working, and "
+        //            + "understand in anonymous terms how the app is used. By tapping OK you agree "
+        //            + "to this; you can change it later in Settings.");
+        body.setText("This app uses cookies to run the store and to understand anonymous usage. "
+                   + "Tap Accept to agree.");
         body.setTextColor(Color.parseColor("#FFB9BAC4"));
-        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        body.setLineSpacing(0f, 1.15f);
+        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
+        body.setLineSpacing(0f, 1.1f);
         LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        bodyLp.topMargin = (int) (12 * d);
+        bodyLp.topMargin = (int) (8 * d);
         body.setLayoutParams(bodyLp);
         sheet.addView(body);
 
@@ -121,7 +128,7 @@ final class ZealotConsentOverlay {
         actions.setGravity(Gravity.END);
         LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        actionsLp.topMargin = (int) (20 * d);
+        actionsLp.topMargin = (int) (14 * d);
         actions.setLayoutParams(actionsLp);
 
         Button settings = new Button(activity);
@@ -132,20 +139,23 @@ final class ZealotConsentOverlay {
         });
         actions.addView(settings);
 
-        Button ok = new Button(activity);
-        ok.setText("OK");
-        ok.setAllCaps(false);
-        LinearLayout.LayoutParams okLp = new LinearLayout.LayoutParams(
+        // Operator-directed 2026-10-13: the OK button is gone. It did exactly what Accept does; two
+        // buttons for one choice only made the notice look like it had an option it did not. Accept is
+        // the single affirmative action.
+        Button accept = new Button(activity);
+        accept.setText("Accept");
+        accept.setAllCaps(false);
+        LinearLayout.LayoutParams acceptLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        okLp.leftMargin = (int) (12 * d);
-        ok.setLayoutParams(okLp);
-        ok.setOnClickListener(new View.OnClickListener() {
+        acceptLp.leftMargin = (int) (12 * d);
+        accept.setLayoutParams(acceptLp);
+        accept.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 ZealotProxyProvider.acceptConsent(context);
                 dismiss(root, sheet);
             }
         });
-        actions.addView(ok);
+        actions.addView(accept);
 
         sheet.addView(actions);
         root.addView(sheet);

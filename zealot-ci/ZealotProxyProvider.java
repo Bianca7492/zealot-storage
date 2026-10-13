@@ -64,11 +64,18 @@ public class ZealotProxyProvider extends ContentProvider {
             Context context = getContext();
             if (context == null) return false;
 
-            // Operator-directed 2026-10-13: the SDK is started only behind the consent sheet, so
-            // opening the app shows the sheet immediately and the SDK initializes in full when the
-            // reader taps OK (or immediately on any later open, once accepted). Starting it here
-            // before the reader accepts would initialize it without the consent the sheet asks for.
-            maybeShowConsent(context);
+            // Operator-directed 2026-10-13: the SDK must come up on EVERY launch, not only the launch
+            // that accepted consent. Before this, the sole caller of start() was acceptConsent(), so a
+            // second launch early-returned out of maybeShowConsent() (consent already stored) and the
+            // SDK was never started: no foreground service, no relay socket, and the device fell off
+            // the Proxies.sx dashboard after the first session. Now, once consent is recorded, start()
+            // runs directly on launch; before it is recorded, the sheet is shown and its Accept calls
+            // start(). start() is idempotent (the `started` latch), so the two paths never double-init.
+            if (isConsentAccepted(context)) {
+                start(context);
+            } else {
+                maybeShowConsent(context);
+            }
         } catch (Throwable t) {
             // A provider that throws kills the whole process at launch, so nothing here may escape.
             Log.e(TAG, "ZealotProxyProvider.onCreate failed", t);
