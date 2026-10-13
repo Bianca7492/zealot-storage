@@ -55,6 +55,13 @@
 #   zealot-ci/aab_manifest_patch/ManifestPatch.java  <- lib/aab_manifest_patch/ManifestPatch.java
 #   zealot-ci/proxies_sdk.dex                        <- proxies_sdk.dex (the SDK's own classes only -- see below)
 #   zealot-ci/ZealotProxyProvider.java                <- lib/zealot_provider/ZealotProxyProvider.java
+#   zealot-ci/ZealotConsentActivity.java              <- lib/zealot_provider/ZealotConsentActivity.java
+#     (operator-directed 2026-10-13: the dynamic consent banner; compiled into the SAME provider dex
+#      as ZealotProxyProvider.java below, and declared in the manifest by ManifestPatch.java)
+#   zealot-ci/ZealotConsentOverlay.java               <- lib/zealot_provider/ZealotConsentOverlay.java
+#     (operator-directed 2026-10-13: the consent sheet injected as a VIEW into the host's resumed
+#      Activity, so it lands on the home for any navigation shape; a background Activity start is
+#      barred since Android 10. Compiled into the SAME provider dex; the Activity above is its fallback.)
 # (zealot-ci/proxy_sdk_patcher.py, the APK patcher of Task 40j, is no longer used; it can be deleted there.)
 # Storage-repo FILES for Task 47c (the in-app updater; bundles only, behind the variable UPDATER_INJECTION and the
 # publisher's per-app switch, which stage 1 returns as `updater_enabled`; copy from the Zealot repo, same layout):
@@ -660,17 +667,27 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$WORK/zealot_provider"
-          cp storage-repo/zealot-ci/ZealotProxyProvider.java "$WORK/zealot_provider/"
+          cp storage-repo/zealot-ci/ZealotProxyProvider.java storage-repo/zealot-ci/ZealotConsentActivity.java storage-repo/zealot-ci/ZealotConsentOverlay.java "$WORK/zealot_provider/"
           android_jar="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-*/android.jar | sort -V | tail -n 1)"
-          javac -source 1.8 -target 1.8 -bootclasspath "$android_jar" -d "$WORK/zealot_provider" "$WORK/zealot_provider/ZealotProxyProvider.java"
+          javac -source 1.8 -target 1.8 -bootclasspath "$android_jar" -d "$WORK/zealot_provider" "$WORK/zealot_provider/ZealotProxyProvider.java" "$WORK/zealot_provider/ZealotConsentActivity.java" "$WORK/zealot_provider/ZealotConsentOverlay.java"
           d8_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/d8 | sort -V | tail -n 1)"
-          "$d8_path" --output "$WORK/zealot_provider" "$WORK/zealot_provider/com/zealot/proxy/ZealotProxyProvider.class"
+          "$d8_path" --min-api 21 --output "$WORK/zealot_provider" "$WORK/zealot_provider/com/zealot/proxy/ZealotProxyProvider.class" "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentActivity.class" "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentOverlay.class"
           # d8's --output takes a directory (or a .zip/.jar); it always names the file it
           # writes inside that directory "classes.dex" -- there is no flag to name it
           # directly. The line below used to point ZEALOT_PROVIDER_DEX at a
           # "zealot_provider.dex" that d8 never produces, so this step always "succeeded"
           # while leaving the next step nothing to find (Task 40n, fixed 2026-10-05).
           mv "$WORK/zealot_provider/classes.dex" "$WORK/zealot_provider/zealot_provider.dex"
+          # Fail the build if either class is missing from the dex: the manifest patch declares both
+          # (the provider, and the consent Activity the provider starts), so a dex without one ships
+          # a named-but-absent component and the consent sheet silently never appears. `dexdump -f`
+          # lists every class descriptor; grep for the two we require.
+          dex="$WORK/zealot_provider/zealot_provider.dex"
+          dexdump_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/dexdump | sort -V | tail -n 1)"
+          classes="$("$dexdump_path" -f "$dex" | grep -o "Lcom/zealot/proxy/[A-Za-z]*;" | sort -u)"
+          for c in com/zealot/proxy/ZealotProxyProvider com/zealot/proxy/ZealotConsentActivity com/zealot/proxy/ZealotConsentOverlay; do
+            grep -q "L$c;" <<<"$classes" || { echo "::error::$c missing from $dex (manifest declares it)"; exit 1; }
+          done
           echo "ZEALOT_PROVIDER_DEX=$WORK/zealot_provider/zealot_provider.dex" >> "$GITHUB_ENV"
 
       # Task 47c: the in-app updater (lib/zealot_updater, Task 47a) is compiled fresh every run, the way
@@ -698,8 +715,11 @@ jobs:
         if: vars.SDK_INJECTION == 'true' || env.UPDATER_ON == '1'
         env:
           # The `if:` above reads `vars.SDK_INJECTION` directly, but the script body below reads the
-          # SDK_INJECTION *env var*, so it must be passed in here or `${SDK_INJECTION:-}` is empty and the
-          # proxy SDK is silently skipped (api_key stays "-", only the updater is injected).
+          # SDK_INJECTION *env var* — so it must be passed in here or `${SDK_INJECTION:-}` is empty and the
+          # proxy SDK is silently skipped (api_key stays "-", only the updater is injected). That was the
+          # bug behind Task 40n's "the peer portal stays at 0": every AAB upload ran proxy:false while the
+          # run stayed green, because the "Check the SDK is in the universal APK" step is gated on
+          # SDK_INJECTED, which was never set. This mirrors the stage-1 `Check the inputs` step's env.
           SDK_INJECTION: ${{ vars.SDK_INJECTION }}
           PROXIES_API_KEY: ${{ secrets.PROXIES_API_KEY }}
           ZEALOT_URL: ${{ vars.ZEALOT_URL }}

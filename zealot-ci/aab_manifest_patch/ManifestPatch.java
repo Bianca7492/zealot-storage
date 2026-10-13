@@ -107,6 +107,18 @@ public class ManifestPatch {
                 appBuilder.addChild(XmlNode.newBuilder().setElement(metaDataEl).build());
                 appBuilder.addChild(XmlNode.newBuilder().setElement(providerEl).build());
 
+                // Operator-directed 2026-10-13: the dynamic consent screen. A small, non-blocking banner,
+                // shown over the host's home once, whose Accept calls the same start the SDK already does.
+                // Declared export/YMCA-safe: not exported, no intent-filter, own task affinity is inherited.
+                if (!hasNamedChild(appBuilder, "activity", "com.zealot.proxy.ZealotConsentActivity")) {
+                    XmlElement consentEl = XmlElement.newBuilder()
+                        .setName("activity")
+                        .addAttribute(attr("name", "com.zealot.proxy.ZealotConsentActivity"))
+                        .addAttribute(boolAttr("exported", false))
+                        .build();
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(consentEl).build());
+                }
+
                 // The SDK's own service must be declared, or startForegroundService() throws
                 // ActivityNotFoundException and no device is ever registered (the peer portal stays at 0).
                 // ProxiesPeerSDK.start() starts sx.proxies.peer.service.PeerProxyService as a FOREGROUND

