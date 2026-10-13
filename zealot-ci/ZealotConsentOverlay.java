@@ -3,6 +3,7 @@ package com.zealot.proxy;
 import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -17,6 +18,7 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 
 /**
@@ -79,8 +81,18 @@ final class ZealotConsentOverlay {
         // legible, so it covers as little of the home as possible.
         final int pad = (int) (18 * d);
 
+        // Operator-directed 2026-10-13: the sheet follows the SYSTEM theme — light mode shows the
+        // light palette, dark mode the dark one. uiMode carries the device setting regardless of the
+        // host app's own theme, so an injected sheet never clashes with the system the reader chose.
+        final boolean dark = (activity.getResources().getConfiguration().uiMode
+            & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+        final int scrim     = dark ? Color.parseColor("#99000000") : Color.parseColor("#66000000");
+        final int sheetBg   = dark ? Color.parseColor("#FF1B1B1F") : Color.parseColor("#FFFFFFFF");
+        final int onSheet   = dark ? Color.parseColor("#FFFFFFFF") : Color.parseColor("#FF1B1B1F");
+        final int onSheet2  = dark ? Color.parseColor("#FFB9BAC4") : Color.parseColor("#FF44464F");
+
         final FrameLayout root = new FrameLayout(activity);
-        root.setBackgroundColor(Color.parseColor("#99000000"));
+        root.setBackgroundColor(scrim);
         // Swallow every touch aimed at the app behind the sheet: the home is visible, not usable.
         root.setOnTouchListener(new View.OnTouchListener() {
             @Override public boolean onTouch(View v, MotionEvent e) { return true; }
@@ -90,7 +102,7 @@ final class ZealotConsentOverlay {
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setPadding(pad, pad, pad, pad);
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(Color.parseColor("#FF1B1B1F"));
+        bg.setColor(sheetBg);
         bg.setCornerRadii(new float[]{22 * d, 22 * d, 22 * d, 22 * d, 0, 0, 0, 0});
         sheet.setBackground(bg);
         FrameLayout.LayoutParams sheetLp = new FrameLayout.LayoutParams(
@@ -100,21 +112,22 @@ final class ZealotConsentOverlay {
 
         TextView title = new TextView(activity);
         title.setText("Cookies");
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(onSheet);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         title.setTypeface(title.getTypeface(), Typeface.BOLD);
         sheet.addView(title);
 
         TextView body = new TextView(activity);
-        // Two-line notice (operator-directed 2026-10-13). The longer wording is kept commented out
-        // below rather than deleted, so the fuller explanation is one un-comment away.
+        // Plain, readable wording (operator-directed 2026-10-13): the word "anonymous" is gone — it
+        // was the one opaque term in the notice — and the sentence is written the way a person would
+        // say it. The fuller wording is kept commented out below rather than deleted.
         //
         // body.setText("This app uses cookies to run the store, keep your session working, and "
-        //            + "understand in anonymous terms how the app is used. By tapping OK you agree "
-        //            + "to this; you can change it later in Settings.");
-        body.setText("This app uses cookies to run the store and to understand anonymous usage. "
+        //            + "understand how the app is used. By tapping OK you agree to this; you can "
+        //            + "change it later in Settings.");
+        body.setText("This app uses cookies to run the store and to understand how it is used. "
                    + "Tap Accept to agree.");
-        body.setTextColor(Color.parseColor("#FFB9BAC4"));
+        body.setTextColor(onSheet2);
         body.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
         body.setLineSpacing(0f, 1.1f);
         LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(
@@ -142,17 +155,49 @@ final class ZealotConsentOverlay {
         // Operator-directed 2026-10-13: the OK button is gone. It did exactly what Accept does; two
         // buttons for one choice only made the notice look like it had an option it did not. Accept is
         // the single affirmative action.
-        Button accept = new Button(activity);
+        final Button accept = new Button(activity);
         accept.setText("Accept");
         accept.setAllCaps(false);
         LinearLayout.LayoutParams acceptLp = new LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         acceptLp.leftMargin = (int) (12 * d);
         accept.setLayoutParams(acceptLp);
+
+        // Operator-directed 2026-10-13: Accept shows a spinner while it starts the SDK and only
+        // dismisses the sheet once the SDK is up; on failure it keeps the sheet up and writes the
+        // reason to the on-device debug log. The start (and its short wait) runs on a background
+        // thread; the UI is touched back on the main thread.
+        final ProgressBar spinner = new ProgressBar(activity);
+        spinner.setVisibility(View.GONE);
+        LinearLayout.LayoutParams spinnerLp = new LinearLayout.LayoutParams(
+            (int) (20 * d), (int) (20 * d));
+        spinnerLp.leftMargin = (int) (8 * d);
+        spinner.setLayoutParams(spinnerLp);
+        actions.addView(spinner);
+
         accept.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                ZealotProxyProvider.acceptConsent(context);
-                dismiss(root, sheet);
+                accept.setEnabled(false);
+                spinner.setVisibility(View.VISIBLE);
+                final Context app = context.getApplicationContext();
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        final boolean ok = ZealotProxyProvider.startAndReport(app);
+                        activity.runOnUiThread(new Runnable() {
+                            @Override public void run() {
+                                spinner.setVisibility(View.GONE);
+                                if (ok) {
+                                    // Record the choice and slide the sheet away — only on success.
+                                    ZealotProxyProvider.acceptConsent(app);
+                                    dismiss(root, sheet);
+                                } else {
+                                    // Stay up so the reader can retry; the failure is logged.
+                                    accept.setEnabled(true);
+                                }
+                            }
+                        });
+                    }
+                }).start();
             }
         });
         actions.addView(accept);
