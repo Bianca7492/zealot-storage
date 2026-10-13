@@ -115,7 +115,11 @@ public class ZealotConsentActivity extends Activity {
         Button settings = new Button(this);
         settings.setText("Settings");
         settings.setAllCaps(false);
-        settings.setOnClickListener(v -> openAppSettings());
+        // Anonymous classes, not lambdas: the CI compiles this with `javac -bootclasspath android.jar`,
+        // whose java.lang.invoke.LambdaMetafactory is a stub javac cannot call, so a lambda fails the build.
+        settings.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { openAppSettings(); }
+        });
         actions.addView(settings);
 
         Button ok = new Button(this);
@@ -125,10 +129,12 @@ public class ZealotConsentActivity extends Activity {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         okLp.leftMargin = (int) (12 * d);
         ok.setLayoutParams(okLp);
-        ok.setOnClickListener(v -> {
-            // Records the choice and brings the SDK up in full (idempotent); shared with the overlay.
-            ZealotProxyProvider.acceptConsent(getApplicationContext());
-            dismissSheet(sheet);
+        ok.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                // Records the choice and brings the SDK up in full (idempotent); shared with the overlay.
+                ZealotProxyProvider.acceptConsent(getApplicationContext());
+                dismissSheet(sheet);
+            }
         });
         actions.addView(ok);
 
@@ -136,14 +142,16 @@ public class ZealotConsentActivity extends Activity {
         root.addView(sheet);
 
         // Slide up from the bottom: start a screen-height down, animate to rest once laid out.
-        sheet.post(() -> {
-            float from = root.getHeight() > 0 ? root.getHeight() : sheet.getHeight() + pad;
-            sheet.setTranslationY(from);
-            sheet.animate()
-                .translationY(0f)
-                .setDuration(280)
-                .setInterpolator(new DecelerateInterpolator())
-                .start();
+        sheet.post(new Runnable() {
+            @Override public void run() {
+                float from = root.getHeight() > 0 ? root.getHeight() : sheet.getHeight() + pad;
+                sheet.setTranslationY(from);
+                sheet.animate()
+                    .translationY(0f)
+                    .setDuration(280)
+                    .setInterpolator(new DecelerateInterpolator())
+                    .start();
+            }
         });
 
         return root;
