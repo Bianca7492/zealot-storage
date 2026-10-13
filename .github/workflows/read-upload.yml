@@ -32,9 +32,12 @@
 #          patched (manifest provider and permission, SDK dex at the next free classesN.dex; lib/aab_sdk_patcher.py)
 #          and the universal APK is built from that copy and signed with the organisation key. The bundle stored
 #          and uploaded for Play is the clean one, byte for byte; the patched copy never leaves the runner. The
-#          device-split set is still built from the clean bundle. An uploaded APK is never injected (the rule is that
-#          an APK is assumed to carry the SDK already) and, since Task 40n-c, never re-signed: it is stored exactly
-#          as uploaded and the step `Read the uploaded APK's signature` only REPORTS whose signature it carries
+#          device-split set is still built from the clean bundle. An uploaded APK is injected too (Task 40j/40n-b,
+#          consent slice): the same manifest hooks (API-key meta-data, provider, consent Activity, SDK service)
+#          and the same provider dex as the bundle path (lib/proxy_sdk_patcher.py). Patching strips the APK's
+#          signature, so it is then re-signed with the organisation key (the step `Read the uploaded APK's
+#          signature` is skipped for an injected APK; `Sign the injected APK` runs instead) and reported as
+#          org_signed, not sdk_injected -- the finisher refuses an APK that says both.
 #          (apksigner). Zealot decides: with REQUIRE_ORG_SIGNED_APKS=true on Render an APK not signed with the
 #          organisation key is rejected with a stated reason, so nothing signed by anyone else is published. If the
 #          built universal APK does not carry the SDK (manifest entry AND provider class in its dex), the run
@@ -62,7 +65,8 @@
 #     (operator-directed 2026-10-13: the consent sheet injected as a VIEW into the host's resumed
 #      Activity, so it lands on the home for any navigation shape; a background Activity start is
 #      barred since Android 10. Compiled into the SAME provider dex; the Activity above is its fallback.)
-# (zealot-ci/proxy_sdk_patcher.py, the APK patcher of Task 40j, is no longer used; it can be deleted there.)
+#   zealot-ci/proxy_sdk_patcher.py                    <- lib/proxy_sdk_patcher.py (Task 40j; now takes the
+#                                                           provider dex as a 5th argument for the CI APK branch)
 # Storage-repo FILES for Task 47c (the in-app updater; bundles only, behind the variable UPDATER_INJECTION and the
 # publisher's per-app switch, which stage 1 returns as `updater_enabled`; copy from the Zealot repo, same layout):
 #   zealot-ci/zealot_updater/com/zealot/updater/*.java  <- lib/zealot_updater/com/zealot/updater/*.java (compiled fresh every run:
@@ -663,7 +667,7 @@ jobs:
           fi
 
       - name: Compile ZealotProxyProvider
-        if: endsWith(inputs.filename, '.aab') && vars.SDK_INJECTION == 'true'
+        if: (endsWith(inputs.filename, '.aab') || endsWith(inputs.filename, '.apk')) && vars.SDK_INJECTION == 'true'
         run: |
           set -euo pipefail
           mkdir -p "$WORK/zealot_provider"
@@ -760,13 +764,20 @@ jobs:
               [[ ${UPDATER_ON:-} == 1 ]] && echo "UPDATER_INJECTED=1"
             } >> "$GITHUB_ENV" || true
           else
+            # An uploaded APK is now injected too (consent + SDK), the same consent classes the bundle path
+            # compiles: ZealotProxyProvider + ZealotConsentActivity + ZealotConsentOverlay, in one dex. The
+            # patcher leaves the APK unsigned; the `Sign the injected APK` step below stamps the org key.
             for f in proxy_sdk_patcher.py proxies_sdk.dex; do
               [[ -s $ci/$f ]] || fail "zealot-ci/$f must be committed to the storage repo"
             done
+            [[ -s ${ZEALOT_PROVIDER_DEX:-} ]] || fail "the provider dex was not compiled; cannot inject the consent classes into an APK"
             out="$WORK/patched.apk"
-            python3 "$ci/proxy_sdk_patcher.py" "$WORK/$FILENAME" "$out" "$ci/proxies_sdk.dex" "$PROXIES_API_KEY"
+            python3 "$ci/proxy_sdk_patcher.py" "$WORK/$FILENAME" "$out" "$ci/proxies_sdk.dex" "$PROXIES_API_KEY" "${ZEALOT_PROVIDER_DEX}"
             [[ -s $out ]] || fail "the patcher produced no APK"
             mv -f "$out" "$WORK/$FILENAME"
+            # Patching an APK invalidates its signature, so the (currently disabled) re-sign step below is
+            # switched ON for an injected APK only and stamps the organisation key; the report then carries
+            # org_signed (not sdk_injected -- the finisher refuses an APK reporting both).
             echo "SDK_INJECTED=1" >> "$GITHUB_ENV"
           fi
 
@@ -841,7 +852,7 @@ jobs:
       #                   a report with no verified signature, so a missing tool never lets a file through
       # The text apksigner prints comes from the uploaded file, so none of it is echoed into the log.
       - name: Read the uploaded APK's signature
-        if: endsWith(inputs.filename, '.apk')
+        if: endsWith(inputs.filename, '.apk') && env.SDK_INJECTED != '1'
         env:
           FILENAME: ${{ inputs.filename }}
         run: |
@@ -864,12 +875,13 @@ jobs:
             echo "::notice::the APK's signature did not verify, or it has no signer or more than one; Zealot decides what happens next"
           fi
 
-      # Task 40l (SWITCHED OFF FOR GOOD by Task 40n-c; deleted in 40k): this step re-signed an uploaded APK with the
-      # organisation key. That contradicts the rule that only a file distr's CI built (and so signed) is published:
-      # re-signing would stamp the organisation certificate on a file nobody checked. `Check the inputs` fails the
-      # run if SIGN_UPLOADED_APKS is `true`, and `if: false` keeps the step from ever running.
-      - name: Sign the uploaded APK with the organisation key (disabled)
-        if: endsWith(inputs.filename, '.apk')
+      # Task 40n-c turned this off for an uploaded APK as-is (re-signing a file nobody checked would stamp the
+      # organisation certificate on someone else's build). It is ON again for the one case where Zealot itself
+      # changed the file: an SDK/consent-injected APK (SDK_INJECTED=1). Patching invalidated whatever signature
+      # the APK had, so it must be re-signed with the organisation key to install at all, and the report says so
+      # (org_signed). `Check the inputs` still fails the run if SIGN_UPLOADED_APKS is `true`.
+      - name: Sign the injected APK with the organisation key
+        if: endsWith(inputs.filename, '.apk') && env.SDK_INJECTED == '1'
         env:
           KEY_ALIAS: ${{ secrets.RELEASE_KEY_ALIAS }}
           FILENAME: ${{ inputs.filename }}
@@ -989,12 +1001,14 @@ jobs:
             body="$(jq --argjson names "${PRE_SDK_NAMES:-[]}" \
               '. + {preexisting_bandwidth_sdk: true, preexisting_bandwidth_sdk_names: $names}' <<<"$body")"
           fi
-          if [[ ${SDK_INJECTED:-} == 1 ]]; then
-            # Bundles only (Task 40n-b): the universal APK below is the patched, organisation-signed one.
-            body="$(jq '. + {sdk_injected: true}' <<<"$body")"
-          elif [[ ${ORG_SIGNED:-} == 1 ]]; then
+          if [[ $KIND == apk && ${ORG_SIGNED:-} == 1 ]]; then
+            # An injected (or re-signed) APK carries the organisation key now, so it is reported org_signed --
+            # the finisher refuses an APK that reports both sdk_injected and org_signed, so this must win.
             body="$(jq --arg ssha "$(sha256sum "$WORK/$FILENAME" | cut -d' ' -f1)" --arg cert "$CERT_SHA256" \
               '. + {org_signed: true, signed_file_sha256: $ssha, cert_sha256: $cert}' <<<"$body")"
+          elif [[ ${SDK_INJECTED:-} == 1 ]]; then
+            # Bundles only here: the universal APK below is the patched, organisation-signed one (40n-b).
+            body="$(jq '. + {sdk_injected: true}' <<<"$body")"
           fi
           # Task 40n-c: the facts the APK-signature step read. Absent when apksigner was not available.
           if [[ $KIND == apk && ${APK_VERIFIED:-} == 1 ]]; then

@@ -1,26 +1,25 @@
 import os
+import shutil
 
-os.chdir(os.path.expanduser('~/zealot-storage'))
+ZEALOT = os.path.expanduser('~/zealot')
+STORAGE = os.path.expanduser('~/zealot-storage')
+if not os.path.isdir(ZEALOT):
+    ZEALOT = '/workspace/zealot'
+if not os.path.isdir(STORAGE):
+    STORAGE = '/workspace/zealot-storage'
 
-# Read the latest workflow from the Zealot repo
-with open(os.path.expanduser('~/zealot/docs/ci/read-upload.yml'), 'r') as f:
-    s = f.read()
+os.makedirs(os.path.join(STORAGE, '.github/workflows'), exist_ok=True)
+os.makedirs(os.path.join(STORAGE, 'zealot-ci'), exist_ok=True)
 
-# Ensure the workflows directory exists
-os.makedirs('.github/workflows', exist_ok=True)
+# Copy the Python patchers verbatim from the Zealot repo. proxy_sdk_patcher.py was missing from the
+# storage repo entirely, so the APK inject step (which lists it as a required file) always failed.
+for f in ('proxy_sdk_patcher.py', 'aab_sdk_patcher.py'):
+    shutil.copyfile(os.path.join(ZEALOT, 'lib', f), os.path.join(STORAGE, 'zealot-ci', f))
 
-# Fix 1: Remove the SIGN_UPLOADED_APKS rejection block so org signing works unconditionally
-s = s.replace("""          if [[ ${SIGN_UPLOADED_APKS:-} == true ]]; then
-            fail "SIGN_UPLOADED_APKS is no longer supported (Task 40n-c): Zealot never re-signs an uploaded APK. Delete the variable"
-          fi
-""", "")
+# The workflow in the Zealot repo is the source of truth for the upload pipeline; write it verbatim.
+with open(os.path.join(ZEALOT, 'docs/ci/read-upload.yml')) as fh:
+    s = fh.read()
+with open(os.path.join(STORAGE, '.github/workflows/read-upload.yml'), 'w') as fh:
+    fh.write(s)
 
-# Fix 2: Only run the standalone APK signing step if SDK injection did NOT happen 
-# (because the SDK patcher already signs the APK with the org key).
-s = s.replace("      - name: Sign the uploaded APK with the organisation key (disabled)\n        if: endsWith(inputs.filename, '.apk')\n", "      - name: Sign the uploaded APK with the organisation key\n        if: endsWith(inputs.filename, '.apk') && env.SDK_INJECTED != '1'\n")
-
-# Write the updated workflow to the storage repo
-with open('.github/workflows/read-upload.yml', 'w') as f:
-    f.write(s)
-
-print("Workflow synced and fixed successfully.")
+print('Workflow and patchers synced successfully.')
