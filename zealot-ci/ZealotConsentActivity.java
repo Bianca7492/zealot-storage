@@ -175,7 +175,9 @@ public class ZealotConsentActivity extends Activity {
             .translationY(sheet.getHeight() > 0 ? sheet.getHeight() : 1200f)
             .setDuration(200)
             .setInterpolator(new DecelerateInterpolator())
-            .withEndAction(this::finish)
+            .withEndAction(new Runnable() {
+                @Override public void run() { finish(); }
+            })
             .start();
     }
 }
