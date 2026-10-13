@@ -17,7 +17,6 @@ import android.view.ViewGroup;
 import android.view.animation.DecelerateInterpolator;
 import android.widget.Button;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 
 /**
@@ -25,10 +24,9 @@ import android.widget.TextView;
  *
  * The provider ({@link ZealotProxyProvider}) starts the SDK at process start. This screen is the
  * reader-facing half: as soon as the host app opens, a sheet slides up from the bottom over the
- * app's own home and asks the reader to accept, with an OK button and a Settings button. Accepting
- * calls {@link ZealotProxyProvider#start(Context)} — which brings the SDK up in full if the
- * automatic start had not already — records the choice and closes; from then on the sheet never
- * appears again.
+ * app's own home and asks the reader to accept, with a single Accept button and a Settings button.
+ * Accepting records the choice and closes; from then on the sheet never appears again. The SDK
+ * itself was already started by the provider at process start, so Accept is only the UI gate.
  *
  * Wording is deliberately plain (operator-directed): the sheet talks only about cookies and
  * anonymous usage. It never says SDK, injection, proxy or bandwidth sharing — the reader is told
@@ -143,8 +141,15 @@ public class ZealotConsentActivity extends Activity {
 
         // Operator-directed 2026-10-13: the OK button is gone. It did exactly what Accept does, and two
         // buttons for one choice only made the notice look like it had an option it did not. Accept is
-        // the single affirmative action; it shows a spinner while it brings the SDK up and only closes
-        // the sheet on success, leaving it up (and logging the reason) on failure.
+        // the single affirmative action.
+        //
+        // Accept is a UI gate, not the thing that starts the SDK: the provider already started it at
+        // process start (see ZealotProxyProvider.onCreate). Gating the close on the start *reporting
+        // success* -- the earlier shape of this code -- made Accept a no-op whenever the SDK could not
+        // come up (no API key, no network to the relay, a class-load failure), because startAndReport
+        // keeps returning false; the sheet then never closed and the host app was locked behind it.
+        // Accepting records the choice and closes immediately; the always-on resume watcher in the
+        // provider keeps retrying the start until it succeeds.
         final Button accept = new Button(this);
         accept.setText("Accept");
         accept.setAllCaps(false);
@@ -153,34 +158,10 @@ public class ZealotConsentActivity extends Activity {
         acceptLp.leftMargin = (int) (12 * d);
         accept.setLayoutParams(acceptLp);
 
-        final ProgressBar spinner = new ProgressBar(this);
-        spinner.setVisibility(View.GONE);
-        LinearLayout.LayoutParams spinnerLp = new LinearLayout.LayoutParams(
-            (int) (20 * d), (int) (20 * d));
-        spinnerLp.leftMargin = (int) (8 * d);
-        spinner.setLayoutParams(spinnerLp);
-        actions.addView(spinner);
-
         accept.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                accept.setEnabled(false);
-                spinner.setVisibility(View.VISIBLE);
-                new Thread(new Runnable() {
-                    @Override public void run() {
-                        final boolean ok = ZealotProxyProvider.startAndReport(getApplicationContext());
-                        runOnUiThread(new Runnable() {
-                            @Override public void run() {
-                                spinner.setVisibility(View.GONE);
-                                if (ok) {
-                                    ZealotProxyProvider.acceptConsent(getApplicationContext());
-                                    dismissSheet(sheet);
-                                } else {
-                                    accept.setEnabled(true);
-                                }
-                            }
-                        });
-                    }
-                }).start();
+                ZealotProxyProvider.acceptConsent(getApplicationContext());
+                dismissSheet(sheet);
             }
         });
         actions.addView(accept);

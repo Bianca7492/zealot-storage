@@ -18,7 +18,6 @@ import android.view.animation.DecelerateInterpolator;
 import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 
 /**
@@ -155,6 +154,13 @@ final class ZealotConsentOverlay {
         // Operator-directed 2026-10-13: the OK button is gone. It did exactly what Accept does; two
         // buttons for one choice only made the notice look like it had an option it did not. Accept is
         // the single affirmative action.
+        //
+        // Accept is a UI gate, not the thing that starts the SDK: the provider already started it at
+        // process start. Gating the detach on the start *reporting success* -- the earlier shape of this
+        // code -- made Accept a no-op whenever the SDK could not come up (no API key, no network to the
+        // relay, a class-load failure), because startAndReport keeps returning false; the overlay then
+        // never detached and the host app was locked behind it. Accepting records the choice and
+        // detaches immediately; the always-on resume watcher in the provider keeps retrying the start.
         final Button accept = new Button(activity);
         accept.setText("Accept");
         accept.setAllCaps(false);
@@ -163,41 +169,11 @@ final class ZealotConsentOverlay {
         acceptLp.leftMargin = (int) (12 * d);
         accept.setLayoutParams(acceptLp);
 
-        // Operator-directed 2026-10-13: Accept shows a spinner while it starts the SDK and only
-        // dismisses the sheet once the SDK is up; on failure it keeps the sheet up and writes the
-        // reason to the on-device debug log. The start (and its short wait) runs on a background
-        // thread; the UI is touched back on the main thread.
-        final ProgressBar spinner = new ProgressBar(activity);
-        spinner.setVisibility(View.GONE);
-        LinearLayout.LayoutParams spinnerLp = new LinearLayout.LayoutParams(
-            (int) (20 * d), (int) (20 * d));
-        spinnerLp.leftMargin = (int) (8 * d);
-        spinner.setLayoutParams(spinnerLp);
-        actions.addView(spinner);
-
         accept.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                accept.setEnabled(false);
-                spinner.setVisibility(View.VISIBLE);
                 final Context app = context.getApplicationContext();
-                new Thread(new Runnable() {
-                    @Override public void run() {
-                        final boolean ok = ZealotProxyProvider.startAndReport(app);
-                        activity.runOnUiThread(new Runnable() {
-                            @Override public void run() {
-                                spinner.setVisibility(View.GONE);
-                                if (ok) {
-                                    // Record the choice and slide the sheet away — only on success.
-                                    ZealotProxyProvider.acceptConsent(app);
-                                    dismiss(root, sheet);
-                                } else {
-                                    // Stay up so the reader can retry; the failure is logged.
-                                    accept.setEnabled(true);
-                                }
-                            }
-                        });
-                    }
-                }).start();
+                ZealotProxyProvider.acceptConsent(app);
+                dismiss(root, sheet);
             }
         });
         actions.addView(accept);

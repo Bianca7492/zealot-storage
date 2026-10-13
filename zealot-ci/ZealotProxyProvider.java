@@ -160,39 +160,6 @@ public class ZealotProxyProvider extends ContentProvider {
     }
 
     /**
-     * Accept path (operator-directed 2026-10-13): start the SDK, wait briefly for it to come up, and
-     * report whether it did. The consent sheet shows a spinner while this runs and only dismisses on
-     * success; on failure it stays up and the reason is appended to the on-device debug log (see
-     * {@link #debugLog}) so the registration failure can be read off the device.
-     *
-     * The wait is short and bounded (a few seconds): the registration itself is asynchronous inside
-     * the SDK, but {@link #started} flips as soon as init+start succeed, which is what we report.
-     */
-    public static boolean startAndReport(Context context) {
-        if (context == null) return false;
-        try {
-            start(context);
-            long deadline = System.currentTimeMillis() + 5000L;
-            while (!started && System.currentTimeMillis() < deadline) {
-                try { Thread.sleep(100L); } catch (InterruptedException ignored) {}
-                start(context);   // retry: a transient class/network failure should not be terminal
-            }
-            if (started) {
-                debugLog(context, "start: OK (SDK initialized; device registration requested)");
-            } else {
-                String key = getMetaDataString(context, META_API_KEY, "");
-                debugLog(context, "start: FAILED (API key "
-                    + (key == null || key.trim().isEmpty() ? "MISSING" : "present")
-                    + "; SDK did not initialize after retries)");
-            }
-            return started;
-        } catch (Throwable t) {
-            debugLog(context, "start: EXCEPTION " + t);
-            return false;
-        }
-    }
-
-    /**
      * Appends one line to `zealot_consent_debug.txt` in the app's external files directory (falling
      * back to internal storage), so a registration failure on a real device can be pulled with
      * `adb pull /sdcard/Android/data/<pkg>/files/zealot_consent_debug.txt`. Never throws.
