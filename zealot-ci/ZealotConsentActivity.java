@@ -4,9 +4,12 @@ import android.app.Activity;
 import android.content.Context;
 import android.content.Intent;
 import android.content.res.Configuration;
+import android.content.res.ColorStateList;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.RippleDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
@@ -64,18 +67,27 @@ public class ZealotConsentActivity extends Activity {
     /** The dimmed backdrop with the sheet pinned to the bottom; slides up on show. */
     private View buildSheet() {
         float d = getResources().getDisplayMetrics().density;
-        // Operator-directed 2026-10-13: a compact sheet. It is a notice, not a page, so it uses the
-        // smallest padding and type that stay legible rather than the 24dp/18sp a full screen would.
-        final int pad = (int) (18 * d);
+        // A compact sheet. It is a notice, not a page, so it uses the smallest padding and type that stay
+        // legible rather than the 24dp/18sp a full screen would.
+        final int pad = (int) (20 * d);
 
-        // Operator-directed 2026-10-13: the sheet follows the SYSTEM theme (light/dark), read from
-        // uiMode so it matches the device setting rather than any host-app theme.
+        // The sheet follows the SYSTEM theme (light/dark), read from uiMode so it matches the device
+        // setting rather than any host-app theme.
         final boolean dark = (getResources().getConfiguration().uiMode
             & Configuration.UI_MODE_NIGHT_MASK) == Configuration.UI_MODE_NIGHT_YES;
+
+        // Glass palette: same frosted-translucent treatment as ZealotConsentOverlay, so the two sheets look
+        // identical. A translucent vertical gradient with a hairline edge (a real backdrop blur needs
+        // RenderEffect, API 31; this dex is min-api 21).
         final int scrim    = dark ? Color.parseColor("#99000000") : Color.parseColor("#66000000");
-        final int sheetBg  = dark ? Color.parseColor("#FF1B1B1F") : Color.parseColor("#FFFFFFFF");
+        final int glassTop = dark ? Color.parseColor("#B3323238") : Color.parseColor("#E6FFFFFF");
+        final int glassBot = dark ? Color.parseColor("#A61C1C22") : Color.parseColor("#B8FFFFFF");
+        final int border   = dark ? Color.parseColor("#33FFFFFF") : Color.parseColor("#33000000");
         final int onSheet  = dark ? Color.parseColor("#FFFFFFFF") : Color.parseColor("#FF1B1B1F");
-        final int onSheet2 = dark ? Color.parseColor("#FFB9BAC4") : Color.parseColor("#FF44464F");
+        final int onSheet2 = dark ? Color.parseColor("#FFC7C7D0") : Color.parseColor("#FF44464F");
+        final int accent   = Color.parseColor("#FFD0BCFF");
+        final int accentInk = Color.parseColor("#FF1B1B1F");
+        final int ripple   = dark ? Color.parseColor("#40FFFFFF") : Color.parseColor("#33000000");
 
         // Root: a dim scrim the full height, the sheet pinned to the bottom. Touching the scrim
         // outside the sheet is not "accept" — a cookie notice should not close into a state where
@@ -88,17 +100,16 @@ public class ZealotConsentActivity extends Activity {
         final LinearLayout sheet = new LinearLayout(this);
         sheet.setOrientation(LinearLayout.VERTICAL);
         sheet.setPadding(pad, pad, pad, pad);
-        // A rounded, raised panel: top corners only, so it reads as a sheet rising off the screen
+        // A rounded, raised glass panel: top corners only, so it reads as a sheet rising off the screen
         // edge. Built as a drawable in code, no XML.
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(sheetBg);
-        bg.setCornerRadii(new float[]{22 * d, 22 * d, 22 * d, 22 * d, 0, 0, 0, 0});
-        sheet.setBackground(bg);
+        sheet.setBackground(glassSheet(d, glassTop, glassBot, border));
+        sheet.setClipToOutline(true);
+        sheet.setElevation(12 * d);
 
         TextView title = new TextView(this);
         title.setText("Cookies");
         title.setTextColor(onSheet);
-        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
+        title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         title.setTypeface(title.getTypeface(), Typeface.BOLD);
         sheet.addView(title);
 
@@ -132,6 +143,7 @@ public class ZealotConsentActivity extends Activity {
         Button settings = new Button(this);
         settings.setText("Settings");
         settings.setAllCaps(false);
+        stylePill(settings, transparentPill(d, border), onSheet, ripple, d);
         // Anonymous classes, not lambdas: the CI compiles this with `javac -bootclasspath android.jar`,
         // whose java.lang.invoke.LambdaMetafactory is a stub javac cannot call, so a lambda fails the build.
         settings.setOnClickListener(new View.OnClickListener() {
@@ -157,6 +169,7 @@ public class ZealotConsentActivity extends Activity {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         acceptLp.leftMargin = (int) (12 * d);
         accept.setLayoutParams(acceptLp);
+        stylePill(accept, solidPill(d, accent), accentInk, ripple, d);
 
         accept.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
@@ -195,6 +208,55 @@ public class ZealotConsentActivity extends Activity {
         } catch (Throwable ignored) {
             // No settings screen reachable; leaving the sheet up is still a valid state.
         }
+    }
+
+    /** The frosted panel: a translucent vertical gradient with a hairline edge. See ZealotConsentOverlay. */
+    private static Drawable glassSheet(float d, int top, int bottom, int border) {
+        float r = 24 * d;
+        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM,
+            new int[]{top, bottom});
+        g.setShape(GradientDrawable.RECTANGLE);
+        g.setCornerRadii(new float[]{r, r, r, r, 0, 0, 0, 0});
+        g.setStroke((int) Math.max(1, 1 * d), border);
+        return g;
+    }
+
+    /** A solid accent pill (the affirmative Accept). */
+    private static Drawable solidPill(float d, int fill) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.RECTANGLE);
+        g.setColor(fill);
+        g.setCornerRadius(999 * d);
+        return g;
+    }
+
+    /** A transparent pill with only the hairline edge (the secondary Settings). */
+    private static Drawable transparentPill(float d, int stroke) {
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.RECTANGLE);
+        g.setColor(Color.TRANSPARENT);
+        g.setCornerRadius(999 * d);
+        g.setStroke((int) Math.max(1, 1 * d), stroke);
+        return g;
+    }
+
+    /** Applies a pill background (with a ripple of [ripple]) and strips the Button's default chrome. */
+    private static void stylePill(Button b, Drawable fill, int textColor, int ripple, float d) {
+        b.setAllCaps(false);
+        b.setTextColor(textColor);
+        b.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        b.setTypeface(b.getTypeface(), Typeface.BOLD);
+        if (android.os.Build.VERSION.SDK_INT >= 21) {
+            b.setBackground(new RippleDrawable(ColorStateList.valueOf(ripple), fill, null));
+        } else {
+            b.setBackground(fill);
+        }
+        b.setMinWidth(0);
+        b.setMinimumWidth(0);
+        b.setMinHeight(0);
+        b.setMinimumHeight(0);
+        int px = (int) (16 * d);
+        b.setPadding(px, (int) (9 * d), px, (int) (9 * d));
     }
 
     /** Slides the sheet back down, then finishes. */
