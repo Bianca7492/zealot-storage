@@ -760,13 +760,20 @@ jobs:
               # Task 47j: brand the injected in-app update dialog per tenant. The stage-1 answer named them;
               # absent (the default tenant) leaves the updater's first-party defaults. A tenant display name
               # or package that is not a plain safe token is dropped rather than injected into the manifest.
+              # Regexes live in variables: word-splitting is suppressed on a `=~` RHS that is a
+              # variable, so the space inside the STORE_NAME pattern is a literal there. Inlined, that
+              # unquoted space split the pattern into two words and bash aborted with "syntax error in
+              # conditional expression" (exit 2) at PARSE time -- before this block ran -- so every AAB
+              # upload failed (fixed 2026-10-14).
+              store_name_re='^[A-Za-z0-9][A-Za-z0-9 .&_-]{0,39}$'
+              store_package_re='^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$'
               if [[ -n ${STORE_NAME:-} ]]; then
-                [[ $STORE_NAME =~ ^[A-Za-z0-9][A-Za-z0-9 .&_-]{0,39}$ ]] \
+                [[ $STORE_NAME =~ $store_name_re ]] \
                   && updater_args+=(--store-name "$STORE_NAME") \
                   || echo "::warning::ignoring an unusable tenant store name for the update dialog branding"
               fi
               if [[ -n ${STORE_PACKAGE:-} ]]; then
-                [[ $STORE_PACKAGE =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ ]] \
+                [[ $STORE_PACKAGE =~ $store_package_re ]] \
                   && updater_args+=(--store-package "$STORE_PACKAGE") \
                   || echo "::warning::ignoring an unusable tenant store package for the update dialog branding"
               fi
