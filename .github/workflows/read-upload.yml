@@ -73,6 +73,9 @@
 #                                                           javac against the runner's android.jar, then d8, as for ZealotProxyProvider)
 #   zealot-ci/check-manifest-resource-ids.py            <- docs/ci/test/check-manifest-resource-ids.py (the build fails if an injected
 #                                                           attribute has no resource id or `exported` is not a boolean)
+#   zealot-ci/check-peer-notification-title.py          <- docs/ci/test/check-peer-notification-title.py (Board #50: the build fails
+#                                                           if the peer SDK's notification title is a hard-coded vendor name rather than
+#                                                           the host app's own name, read at runtime from PackageManager.getApplicationLabel)
 #   zealot-ci/aab_sdk_patcher.py and aab_manifest_patch/ManifestPatch.java must be the Task 47b versions (the updater's manifest
 #   entries); an older copy ignores the base URL and the updater would not be declared.
 # Storage-repo FILES for Task 40p (the pre-existing-SDK scan; runs for every upload, APK or AAB, regardless of
@@ -846,6 +849,20 @@ jobs:
           found="$(grep -ac 'com/zealot/proxy/ZealotProxyProvider' "$WORK/universal-dex.bin" || true)"
           rm -f "$WORK/universal-dex.bin"
           [[ ${found:-0} -ge 1 ]] || fail "the manifest names com.zealot.proxy.ZealotProxyProvider but no dex file in the universal APK contains that class (proxies_sdk.dex lacks it); nothing was uploaded"
+
+      # Board #50: the injected peer-proxy notification must show the host app's OWN name, not the SDK
+      # vendor's. The content title used to be the hard-coded "Proxies.sx Peer", so every tenant and
+      # white-label build showed the vendor brand instead of the app the user installed. The committed
+      # proxies_sdk.dex now reads PackageManager.getApplicationLabel at runtime, so one dex names every
+      # app correctly. Fail closed on a regression: read the dex and refuse a hard-coded vendor title.
+      - name: Check the peer notification shows the app's own name
+        if: env.SDK_INJECTED == '1'
+        run: |
+          set -euo pipefail
+          ci=storage-repo/zealot-ci
+          [[ -s $ci/check-peer-notification-title.py ]] || { echo "::error::zealot-ci/check-peer-notification-title.py must be committed to the storage repo"; exit 1; }
+          pip install --quiet androguard
+          python3 "$ci/check-peer-notification-title.py" "$ci/proxies_sdk.dex"
 
       # Task 47c, fail closed like the SDK check above: a universal APK whose manifest names updater components that are
       # not in its dex would crash the app at launch, and one whose injected attributes have no resource id would not
