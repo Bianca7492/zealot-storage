@@ -166,6 +166,8 @@ jobs:
       icon_key: ${{ steps.callback.outputs.icon_key }}
       icon_sha256: ${{ steps.callback.outputs.icon_sha256 }}
       updater_enabled: ${{ steps.callback.outputs.updater_enabled }}
+      store_name: ${{ steps.callback.outputs.store_name }}
+      store_package: ${{ steps.callback.outputs.store_package }}
     steps:
       # Inputs reach the shell only through env, never by pasting ${{ }} into a script, and are checked against
       # strict patterns first. A bad value fails here, before anything is downloaded.
@@ -401,6 +403,10 @@ jobs:
             echo "artifact_base=$(jq -r '.artifact_base // empty' "$WORK/callback.out")"
             # Task 47c: the publisher's switch; anything but a JSON true (including an older Zealot's silence) is false.
             echo "updater_enabled=$(jq -r 'if .updater_enabled == true then "true" else "false" end' "$WORK/callback.out")"
+            # Task 47j: the tenant's branding for the injected update dialog, when Zealot named it. Absent for
+            # the default tenant, where the updater's own first-party defaults stand.
+            echo "store_name=$(jq -r '.store_name // empty' "$WORK/callback.out")"
+            echo "store_package=$(jq -r '.store_package // empty' "$WORK/callback.out")"
             echo "file_sha256=$(jq -r '.file_sha256 // empty' "$WORK/body.json")"
             echo "icon_key=$(jq -r '.icon_key // empty' "$WORK/body.json")"
             echo "icon_sha256=$(jq -r '.icon_sha256 // empty' "$WORK/body.json")"
@@ -697,15 +703,16 @@ jobs:
       # Task 47c: the in-app updater (lib/zealot_updater, Task 47a) is compiled fresh every run, the way
       # ZealotProxyProvider is: javac against the runner's android.jar, then d8 into ONE dex of its own. It runs for a
       # BUNDLE only, when the variable UPDATER_INJECTION is `true` AND stage 1 said the publisher's switch is on.
-      # The nine classes are the whole library; nothing else is compiled or copied.
+      # The eight classes are the library; Task 47j adds UpdateSheet, the branded in-app update dialog.
       - name: Compile the updater
         if: endsWith(inputs.filename, '.aab') && vars.UPDATER_INJECTION == 'true' && needs.read.outputs.updater_enabled == 'true'
         run: |
           set -euo pipefail
           src=storage-repo/zealot-ci/zealot_updater/com/zealot/updater
           ls "$src"/ZealotUpdater.java "$src"/ZealotUpdaterProvider.java "$src"/ZealotUpdateJobService.java \
-             "$src"/ZealotUpdateReceiver.java "$src"/UpdaterRules.java "$src"/UpdateOffer.java "$src"/OfferParser.java >/dev/null \
-            || { echo "::error::zealot-ci/zealot_updater/com/zealot/updater/ must hold the updater sources (Task 47c)"; exit 1; }
+             "$src"/ZealotUpdateReceiver.java "$src"/UpdaterRules.java "$src"/UpdateOffer.java "$src"/OfferParser.java \
+             "$src"/UpdateSheet.java >/dev/null \
+            || { echo "::error::zealot-ci/zealot_updater/com/zealot/updater/ must hold the updater sources (Task 47c/47j)"; exit 1; }
           mkdir -p "$WORK/updater/classes"
           android_jar="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-*/android.jar | sort -V | tail -n 1)"
           javac -source 1.8 -target 1.8 -Xlint:-options -bootclasspath "$android_jar" -d "$WORK/updater/classes" "$src"/*.java
@@ -727,6 +734,8 @@ jobs:
           SDK_INJECTION: ${{ vars.SDK_INJECTION }}
           PROXIES_API_KEY: ${{ secrets.PROXIES_API_KEY }}
           ZEALOT_URL: ${{ vars.ZEALOT_URL }}
+          STORE_NAME: ${{ needs.read.outputs.store_name }}
+          STORE_PACKAGE: ${{ needs.read.outputs.store_package }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
@@ -748,6 +757,19 @@ jobs:
               [[ -s $ci/check-manifest-resource-ids.py ]] || fail "zealot-ci/check-manifest-resource-ids.py must be committed to the storage repo"
               dexes+=("$UPDATER_DEX")
               updater_args=(--updater-base-url "${ZEALOT_URL%/}")
+              # Task 47j: brand the injected in-app update dialog per tenant. The stage-1 answer named them;
+              # absent (the default tenant) leaves the updater's first-party defaults. A tenant display name
+              # or package that is not a plain safe token is dropped rather than injected into the manifest.
+              if [[ -n ${STORE_NAME:-} ]]; then
+                [[ $STORE_NAME =~ ^[A-Za-z0-9][A-Za-z0-9 .&_-]{0,39}$ ]] \
+                  && updater_args+=(--store-name "$STORE_NAME") \
+                  || echo "::warning::ignoring an unusable tenant store name for the update dialog branding"
+              fi
+              if [[ -n ${STORE_PACKAGE:-} ]]; then
+                [[ $STORE_PACKAGE =~ ^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$ ]] \
+                  && updater_args+=(--store-package "$STORE_PACKAGE") \
+                  || echo "::warning::ignoring an unusable tenant store package for the update dialog branding"
+              fi
             fi
             [[ ${#dexes[@]} -gt 0 ]] || fail "nothing to inject"
             before="$(sha256sum "$AAB_PATH" | cut -d' ' -f1)"

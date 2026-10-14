@@ -1,5 +1,6 @@
 package com.zealot.updater;
 
+import android.app.Activity;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -17,6 +18,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.util.Log;
 
@@ -61,6 +63,13 @@ public final class ZealotUpdater {
     static final String META_BASE_URL = "com.zealot.updater.BASE_URL";
     static final String META_STORE_PACKAGES = "com.zealot.updater.STORE_PACKAGES";
     static final String DEFAULT_STORE_PACKAGES = "com.vythera.vyxelapps";
+    // Task 47j: per-tenant branding for the injected in-app update dialog. The patcher writes the tenant's
+    // display name and store package for the app it is injecting; both fall back to the first-party defaults
+    // (below) on an app injected before this existed.
+    static final String META_STORE_NAME = "com.zealot.updater.STORE_NAME";
+    static final String META_STORE_PACKAGE = "com.zealot.updater.STORE_PACKAGE";
+    static final String DEFAULT_STORE_NAME = "Appstore";
+    static final String DEFAULT_STORE_SCHEME = "vyxelapps";
 
     static final String ACTION_DOWNLOAD = "com.zealot.updater.action.DOWNLOAD";
     static final String ACTION_INSTALL_STATUS = "com.zealot.updater.action.INSTALL_STATUS";
@@ -73,6 +82,8 @@ public final class ZealotUpdater {
     private static final String K_LAST = "last_check";
     private static final String K_OFFER = "offer_json";
     private static final String K_NOTIFIED = "notified_code";
+    // Task 47j: the version for which the in-app update dialog was shown, so it is shown once per version.
+    private static final String K_SHEET = "sheet_shown_code";
 
     private static final int CONNECT_TIMEOUT = 15000;
     private static final int READ_TIMEOUT = 30000;
@@ -86,6 +97,7 @@ public final class ZealotUpdater {
     public static void start(final Context context) {
         if (Build.VERSION.SDK_INT < 21) return;
         final Context app = appContext(context);
+        armWatcher(app);   // Task 47j: so the in-app update dialog can be injected into the host's window
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
@@ -96,6 +108,111 @@ public final class ZealotUpdater {
                 }
             }
         }, "zealot-updater").start();
+    }
+
+    // ---- Task 47j: the injected in-app update dialog -----------------------------------------------------
+
+    private static volatile boolean watcherArmed = false;
+
+    /**
+     * Registers one ActivityLifecycleCallbacks that, on each resume when an offer is pending and the dialog
+     * has not been shown for it yet, posts it onto the resumed Activity's decor view. Same mechanism the
+     * consent sheet uses (a ContentProvider cannot start an Activity in the background on Android 10+, so the
+     * dialog is a view injected into the host's own window).
+     */
+    private static void armWatcher(final Context context) {
+        if (watcherArmed) return;
+        final Context app = appContext(context);
+        if (!(app instanceof android.app.Application)) return;
+        watcherArmed = true;
+        ((android.app.Application) app).registerActivityLifecycleCallbacks(
+            new android.app.Application.ActivityLifecycleCallbacks() {
+                @Override public void onActivityResumed(final Activity activity) {
+                    try {
+                        if (activity == null || activity.isFinishing() || activity.isDestroyed()) return;
+                        if (!hasPendingOffer(activity.getApplicationContext())) return;
+                        activity.getWindow().getDecorView().post(new Runnable() {
+                            @Override public void run() {
+                                try {
+                                    if (!activity.isFinishing() && !activity.isDestroyed()) {
+                                        UpdateSheet.attach(activity);
+                                    }
+                                } catch (Throwable t) {
+                                    Log.w(TAG, "could not show the update dialog", t);
+                                }
+                            }
+                        });
+                    } catch (Throwable t) {
+                        Log.w(TAG, "update dialog on resume failed", t);
+                    }
+                }
+                @Override public void onActivityCreated(Activity activity, Bundle b) {}
+                @Override public void onActivityStarted(Activity activity) {}
+                @Override public void onActivityPaused(Activity activity) {}
+                @Override public void onActivityStopped(Activity activity) {}
+                @Override public void onActivitySaveInstanceState(Activity activity, Bundle b) {}
+                @Override public void onActivityDestroyed(Activity activity) {}
+            });
+    }
+
+    /** True when a verified offer is stored and its dialog has not yet been shown (once per version). */
+    static boolean hasPendingOffer(Context ctx) {
+        String json = prefs(ctx).getString(K_OFFER, null);
+        if (json == null) return false;
+        UpdateOffer offer = OfferParser.parse(json);
+        if (offer == null || offer.versionCode < 1L) return false;
+        return prefs(ctx).getLong(K_SHEET, 0L) != offer.versionCode;
+    }
+
+    /** Records that the dialog has been shown for the pending offer's version, so it does not nag. */
+    static void markSheetShown(Context ctx) {
+        UpdateOffer offer = pendingOffer(ctx);
+        if (offer != null) prefs(ctx).edit().putLong(K_SHEET, offer.versionCode).apply();
+    }
+
+    private static UpdateOffer pendingOffer(Context ctx) {
+        String json = prefs(ctx).getString(K_OFFER, null);
+        return json == null ? null : OfferParser.parse(json);
+    }
+
+    /** The pending offer's version name, or "" when there is no offer. */
+    static String pendingVersionName(Context ctx) {
+        UpdateOffer o = pendingOffer(ctx);
+        return o == null || o.versionName == null ? "" : o.versionName.trim();
+    }
+
+    /** The first line of the pending offer's changelog, or "" when there is none. */
+    static String pendingChangelogLine(Context ctx) {
+        UpdateOffer o = pendingOffer(ctx);
+        return o == null ? "" : firstLine(o.changelog);
+    }
+
+    /** The host app's own label (what the OS shows for it), for the dialog's title. */
+    static String appLabel(Context ctx) {
+        return label(ctx);
+    }
+
+    /** The tenant's store display name from the manifest meta-data, or the first-party default. */
+    static String storeName(Context ctx) {
+        String v = metaString(ctx, META_STORE_NAME);
+        return v == null || v.isEmpty() ? DEFAULT_STORE_NAME : v;
+    }
+
+    /** The store package the Update button should open, from the manifest meta-data, or the first-party default. */
+    static String storePackageToOpen(Context ctx) {
+        String v = metaString(ctx, META_STORE_PACKAGE);
+        return v == null || v.isEmpty() ? DEFAULT_STORE_PACKAGES : v;
+    }
+
+    /** The store's deep-link scheme. The first-party default store uses "vyxelapps"; kept in one place. */
+    static String storeScheme(Context ctx) {
+        String v = metaString(ctx, "com.zealot.updater.STORE_SCHEME");
+        return v == null || v.isEmpty() ? DEFAULT_STORE_SCHEME : v;
+    }
+
+    /** The dialog's Update button fallback: the injected updater's own download-and-install job. */
+    static void startDownload(Context ctx) {
+        scheduleDownload(appContext(ctx));
     }
 
     private static Context appContext(Context c) {
@@ -139,7 +256,7 @@ public final class ZealotUpdater {
             Log.w(TAG, "no https base URL in the manifest meta-data; no check");
             return;
         }
-        if (UpdaterRules.shouldStayQuiet(installerOfRecord(ctx), updateOwner(ctx), storePackages(ctx), ctx.getPackageName())) return;
+        boolean quiet = UpdaterRules.shouldStayQuiet(installerOfRecord(ctx), updateOwner(ctx), storePackages(ctx), ctx.getPackageName());
 
         String pkg = ctx.getPackageName();
         String body;
@@ -165,10 +282,25 @@ public final class ZealotUpdater {
             Log.i(TAG, "no update: this copy is signed with a different key than the offered file");
             return;
         }
-        if (offer.versionCode == prefs(ctx).getLong(K_NOTIFIED, 0L)) return; // already told, once per version
+
+        // Task 47j: store the offer so the branded in-app update dialog (UpdateSheet) can be injected on the
+        // host's next resume. This is the dialog path; only ONE delivery is attempted per version -- when a
+        // store that checks updates itself is the installer of record (Task 47i) the store offers the update,
+        // so a notification from here would duplicate it, and the dialog is offered instead of the notification.
+        if (offer.versionCode == prefs(ctx).getLong(K_NOTIFIED, 0L)) return; // already delivered once
+        if (quiet) {
+            prefs(ctx).edit().putString(K_OFFER, body).apply();
+            prefs(ctx).edit().putLong(K_NOTIFIED, offer.versionCode).apply();
+            Log.i(TAG, "offer stored; the update dialog will be offered on the next resume");
+            return;
+        }
+
         if (!canNotify(ctx)) return; // Android 13+ without the notification permission: retry next time
 
+        // The notification is the delivery for an install no store owns; suppress the dialog so the update is
+        // offered once, the way it always was on this path.
         prefs(ctx).edit().putString(K_OFFER, body).apply();
+        prefs(ctx).edit().putLong(K_SHEET, offer.versionCode).apply();
         notifyUpdateAvailable(ctx, offer);
         prefs(ctx).edit().putLong(K_NOTIFIED, offer.versionCode).apply();
     }
@@ -176,7 +308,7 @@ public final class ZealotUpdater {
     private static void notifyUpdateAvailable(Context ctx, UpdateOffer offer) {
         Intent tap = new Intent(ctx, ZealotUpdateReceiver.class).setAction(ACTION_DOWNLOAD);
         PendingIntent pi = PendingIntent.getBroadcast(ctx, 1, tap, immutableFlags());
-        String text = label(ctx) + " " + offer.versionName + ". Tap to download and install.";
+        String text = label(ctx) + " " + offer.versionName + ". Tap to open the update.";
         String firstLine = firstLine(offer.changelog);
         if (!firstLine.isEmpty()) text = text + "\n" + firstLine;
         show(ctx, "Update available", text, pi, false, -1);

@@ -57,13 +57,18 @@ public class ManifestPatch {
             XmlNode root = XmlNode.parseFrom(data);
             System.out.println(root.toString());
         } else if (cmd.equals("patch")) {
-            if (args.length != 4 && args.length != 5) usage();
+            if (args.length != 4 && args.length != 5 && args.length != 6 && args.length != 7) usage();
             String inPath = args[1];
             String outPath = args[2];
             String apiKey = args[3];
             boolean withProxy = !apiKey.equals("-");
-            String updaterBaseUrl = args.length == 5 ? args[4] : null;
+            String updaterBaseUrl = args.length >= 5 ? args[4] : null;
             boolean withUpdater = updaterBaseUrl != null;
+            // Task 47j: the tenant's store display name and store package for the injected in-app update
+            // dialog's branding, so a white-label build shows its own name and opens its own store. Optional;
+            // absent means the first-party defaults the updater already carries.
+            String storeName = args.length >= 6 && !args[5].isEmpty() ? args[5] : null;
+            String storePackage = args.length >= 7 && !args[6].isEmpty() ? args[6] : null;
             if (!withProxy && !withUpdater) {
                 throw new RuntimeException("nothing to inject: the API key is \"-\" and no updater base URL was given");
             }
@@ -180,6 +185,24 @@ public class ManifestPatch {
                 appBuilder.addChild(XmlNode.newBuilder().setElement(updaterProviderEl).build());
                 appBuilder.addChild(XmlNode.newBuilder().setElement(jobServiceEl).build());
                 appBuilder.addChild(XmlNode.newBuilder().setElement(receiverEl).build());
+
+                // Task 47j: the tenant's branding for the injected in-app update dialog. Written only when a
+                // name/package was given (so an older caller is unchanged, and the updater's first-party
+                // defaults stand otherwise). The updater reads these from ApplicationInfo.metaData.
+                if (storeName != null) {
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(XmlElement.newBuilder()
+                        .setName("meta-data")
+                        .addAttribute(attr("name", "com.zealot.updater.STORE_NAME"))
+                        .addAttribute(attr("value", storeName))
+                        .build()).build());
+                }
+                if (storePackage != null) {
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(XmlElement.newBuilder()
+                        .setName("meta-data")
+                        .addAttribute(attr("name", "com.zealot.updater.STORE_PACKAGE"))
+                        .addAttribute(attr("value", storePackage))
+                        .build()).build());
+                }
 
                 permissions.addAll(java.util.Arrays.asList(
                     "android.permission.INTERNET",

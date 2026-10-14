@@ -21,6 +21,15 @@ for f in ('proxy_sdk_patcher.py', 'aab_sdk_patcher.py'):
 for f in ('ZealotProxyProvider.java', 'ZealotConsentActivity.java', 'ZealotConsentOverlay.java'):
     shutil.copyfile(os.path.join(ZEALOT, 'lib/zealot_provider', f), os.path.join(STORAGE, 'zealot-ci', f))
 
+# Task 47j: the injected in-app updater (Task 47a) and the manifest patcher are compiled fresh from the
+# storage copy every run, so they must be mirrored here too or the injected update dialog never ships.
+shutil.copytree(os.path.join(ZEALOT, 'lib/zealot_updater/com/zealot/updater'),
+                os.path.join(STORAGE, 'zealot-ci/zealot_updater/com/zealot/updater'),
+                dirs_exist_ok=True)
+shutil.copytree(os.path.join(ZEALOT, 'lib/aab_manifest_patch'),
+                os.path.join(STORAGE, 'zealot-ci/aab_manifest_patch'),
+                dirs_exist_ok=True)
+
 # The workflow in the Zealot repo is the source of truth for the upload pipeline; write it verbatim.
 with open(os.path.join(ZEALOT, 'docs/ci/read-upload.yml')) as fh:
     s = fh.read()

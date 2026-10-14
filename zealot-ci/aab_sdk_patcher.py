@@ -57,13 +57,19 @@ def _ensure_manifest_patch_compiled(bundletool_jar):
     )
 
 
-def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, updater_base_url=None):
+def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, updater_base_url=None,
+                    store_name=None, store_package=None):
     _ensure_manifest_patch_compiled(bundletool_jar)
     cp = os.pathsep.join([MANIFEST_PATCH_BUILD_DIR, bundletool_jar])
     cmd = ['java', '-cp', cp, 'ManifestPatch', 'patch', manifest_pb_path, output_pb_path, api_key]
     if updater_base_url:
         # Task 47b/47c: the updater's provider, service, receiver, base-URL meta-data and permissions.
         cmd.append(updater_base_url)
+        # Task 47j: tenant branding for the injected in-app update dialog. Positional (args 6 and 7), so the
+        # base URL must be present for them to be read; written only when non-empty.
+        if store_name or store_package:
+            cmd.append(store_name or '')
+            cmd.append(store_package or '')
     subprocess.run(cmd, check=True)
 
 
@@ -84,13 +90,16 @@ def _next_free_dex_name(aab_zip):
     return f'classes{n}.dex'
 
 
-def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater_base_url=None):
+def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater_base_url=None,
+          store_name=None, store_package=None):
     """Produces output_aab as a patched copy of input_aab. Raises on any failure; never writes to
     input_aab. Accepts a list of DEX files to inject.
 
     Task 47c: `api_key` of "-" skips the proxy SDK's provider (the updater can be injected alone), and
     `updater_base_url` (https, no trailing path) adds the updater's manifest entries; the caller passes the
-    updater's compiled dex in `sdk_dex_paths` like any other. Refuses when there is nothing to inject."""
+    updater's compiled dex in `sdk_dex_paths` like any other. Refuses when there is nothing to inject.
+
+    Task 47j: `store_name` / `store_package` brand the injected in-app update dialog for the tenant."""
     if api_key == '-' and not updater_base_url:
         raise ValueError('nothing to inject: no API key and no updater base URL')
     if updater_base_url and not updater_base_url.lower().startswith('https://'):
@@ -120,7 +129,8 @@ def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater
         with open(manifest_in, 'wb') as f:
             f.write(manifest_data)
 
-        _patch_manifest(manifest_in, manifest_out, api_key, bundletool_jar, updater_base_url)
+        _patch_manifest(manifest_in, manifest_out, api_key, bundletool_jar, updater_base_url,
+                        store_name, store_package)
 
         new_dex_mappings = []
         for dex_path in sdk_dex_paths:
@@ -181,6 +191,12 @@ def main():
     ap.add_argument('--updater-base-url', default=None,
                     help='Task 47c: https base URL of Zealot; adds the updater components to the manifest. '
                          'Pass "-" as api_key to inject the updater without the proxy SDK.')
+    ap.add_argument('--store-name', default=None,
+                    help='Task 47j: the tenant store display name the injected in-app update dialog shows. '
+                         'Requires --updater-base-url. Absent means the first-party default.')
+    ap.add_argument('--store-package', default=None,
+                    help='Task 47j: the tenant store package the injected update dialog opens on Update. '
+                         'Requires --updater-base-url. Absent means the first-party default.')
     ap.add_argument('--verify', action='store_true',
                      help='also run bundletool build-apks --mode=universal on the result (unsigned)')
     args = ap.parse_args()
@@ -190,7 +206,7 @@ def main():
         sys.exit(1)
 
     result = patch(args.input_aab, args.output_aab, args.sdk_dex_paths, args.api_key, args.bundletool_jar,
-                   args.updater_base_url)
+                   args.updater_base_url, args.store_name, args.store_package)
     print(f"[*] patched bundle written to {args.output_aab} (SDK dexes added: {result['dexes_added']})")
 
     if args.verify:
