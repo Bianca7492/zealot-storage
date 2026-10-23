@@ -86,8 +86,8 @@ jobs:
           field() { jq -r "$1 // \"\"" <<<"$run_json"; }
           run_json=""
           for attempt in $(seq 1 60); do
-            if run_json="$(gh api "repos/King-Fisher000/Storeapp/actions/runs/${STOREAPP_RUN_ID}" 2>/dev/null)"; then
-              [[ $(field .repository.full_name) == "King-Fisher000/Storeapp" ]] || fail "the run does not belong to King-Fisher000/Storeapp"
+            if run_json="$(gh api "repos/christiana-angel/Storeapp/actions/runs/${STOREAPP_RUN_ID}" 2>/dev/null)"; then
+              [[ $(field .repository.full_name) == "christiana-angel/Storeapp" ]] || fail "the run does not belong to christiana-angel/Storeapp"
               [[ $(field .path) == ".github/workflows/build-tenant-apk.yml" ]] || fail "the run is not build-tenant-apk.yml (path: $(field .path))"
               [[ $(field .head_branch) == "main" ]] || fail "the run was not on main (branch: $(field .head_branch))"
               [[ $(field .status) == "completed" ]] && break
@@ -139,7 +139,7 @@ jobs:
           mkdir -p "$WORK"
           # Download the artifact from the Storeapp run
           # Assuming the artifact is named 'tenant-bundle' and contains 'unsigned.aab'
-          gh run download "$STOREAPP_RUN_ID" -R King-Fisher000/Storeapp -D "$WORK/artifacts" -n tenant-bundle
+          gh run download "$STOREAPP_RUN_ID" -R christiana-angel/Storeapp -D "$WORK/artifacts" -n tenant-bundle
           mv "$WORK/artifacts/unsigned.aab" "$WORK/unsigned.aab"
           rm -rf "$WORK/artifacts"
 
