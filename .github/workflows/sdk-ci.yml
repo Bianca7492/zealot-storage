@@ -152,6 +152,12 @@ jobs:
         run: |
           set -euo pipefail
           HOST=build/host-app-check
+          # The version the host app depends on must be the one publishToMavenLocal just installed,
+          # i.e. the one in gradle.properties. Deriving it (rather than hardcoding it here) is what
+          # keeps this check working across a version bump: a stale literal here failed the whole
+          # job with "Could not find com.zealot:zealot-sdk:<old>" the moment the version moved.
+          SDK_VERSION="$(grep -oP '^zealotSdkVersion=\K.*' gradle.properties | head -1 | tr -d '[:space:]')"
+          : "${SDK_VERSION:?could not read zealotSdkVersion from gradle.properties}"
           rm -rf "$HOST"
           mkdir -p "$HOST/app/src/main/java/com/example/host"
           cp -r gradle gradlew "$HOST/"
@@ -203,9 +209,10 @@ jobs:
 
           dependencies {
               // The ONLY line a host app writes.
-              implementation("com.zealot:zealot-sdk:1.4.0")
+              implementation("com.zealot:zealot-sdk:__SDK_VERSION__")
           }
           EOF
+          sed -i "s/__SDK_VERSION__/$SDK_VERSION/" "$HOST/app/build.gradle.kts"
           cat > "$HOST/app/src/main/AndroidManifest.xml" <<'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
