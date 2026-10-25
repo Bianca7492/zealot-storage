@@ -1,2 +1,13 @@
 __pycache__/
 *.pyc
+
+# Android / Gradle build output for zealot-sdk
+zealot-sdk/.gradle/
+zealot-sdk/build/
+zealot-sdk/sdk/build/
+zealot-sdk/local.properties
+zealot-sdk/.idea/
+*.iml
+
+# The AAB patcher compiles ManifestPatch.class into a sibling build/ dir at run time.
+zealot-ci/aab_manifest_patch/build/

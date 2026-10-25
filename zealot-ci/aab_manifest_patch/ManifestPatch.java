@@ -17,6 +17,21 @@
 // SDK's own (sx.proxies.peer.service.PeerProxyService), which ProxiesPeerSDK.start() starts with
 // startForegroundService(); it must be declared or that call throws and no device is ever registered.
 //
+// Consolidated-SDK addition: the keep-alive / auto-restart layer (com.zealot.sdk.*) is declared too, so an
+// injected app comes back on its own after a reboot, an app update or a network drop -- the defect this
+// layer exists to fix. Because those classes only exist in the consolidated dex, each one is added only
+// when the dex being injected actually carries it: the paths arrive in ZEALOT_SDK_DEX_PATHS
+// (File.pathSeparator-separated) and are substring-searched for the class name, the same read the Python
+// scanners do. An older dex (or none, e.g. a direct call) therefore produces byte-for-byte the old
+// manifest, which is what keeps the existing Render injector and CI branch working unchanged.
+//   <receiver android:name="com.zealot.sdk.ZealotBootReceiver" enabled="true" exported="false">
+//     <intent-filter android:priority="1000"> BOOT_COMPLETED, LOCKED_BOOT_COMPLETED,
+//       QUICKBOOT_POWERON, MY_PACKAGE_REPLACED
+//   <receiver android:name="com.zealot.sdk.ZealotNetworkReceiver"> CONNECTIVITY_CHANGE, WIFI_STATE_CHANGED
+//   <service  android:name="com.zealot.sdk.ZealotWatchdogJobService" BIND_JOB_SERVICE, exported="false"
+//   <receiver android:name="com.zealot.sdk.ZealotEnsureRunningReceiver"> com.zealot.sdk.action.ENSURE_RUNNING
+// plus RECEIVE_BOOT_COMPLETED, which BOOT_COMPLETED delivery requires.
+//
 // Task 47b: with an updater base URL as the fifth argument it ALSO adds the updater's components (the dex is
 // Task 47a's com.zealot.updater library), inside <application>:
 //   <meta-data android:name="com.zealot.updater.BASE_URL" android:value="<https base url>"/>
@@ -140,6 +155,48 @@ public class ManifestPatch {
                     appBuilder.addChild(XmlNode.newBuilder().setElement(syncServiceEl).build());
                 }
 
+                // The keep-alive / auto-restart layer (com.zealot.sdk.*), added with the consolidated
+                // SDK. Without these the injected app has the tunnel but nothing brings it back after
+                // a reboot, an app update or a network drop -- the defect this layer exists to fix
+                // ("when it goes off it doesn't automatically come back on"). Declared only when the
+                // injected dex actually carries them, so an older dex does not get manifest entries
+                // for classes that are not there.
+                if (sdkDexHas("com/zealot/sdk/ZealotBootReceiver")) {
+                    if (!hasNamedChild(appBuilder, "receiver", "com.zealot.sdk.ZealotBootReceiver")) {
+                        appBuilder.addChild(XmlNode.newBuilder().setElement(
+                            receiverWithActions("com.zealot.sdk.ZealotBootReceiver", 1000,
+                                "android.intent.action.BOOT_COMPLETED",
+                                "android.intent.action.LOCKED_BOOT_COMPLETED",
+                                "android.intent.action.QUICKBOOT_POWERON",
+                                "android.intent.action.MY_PACKAGE_REPLACED")).build());
+                    }
+                    // BOOT_COMPLETED is only delivered to an app that declares this permission.
+                    permissions.add("android.permission.RECEIVE_BOOT_COMPLETED");
+                }
+                if (sdkDexHas("com/zealot/sdk/ZealotNetworkReceiver")
+                        && !hasNamedChild(appBuilder, "receiver", "com.zealot.sdk.ZealotNetworkReceiver")) {
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(
+                        receiverWithActions("com.zealot.sdk.ZealotNetworkReceiver", 0,
+                            "android.net.conn.CONNECTIVITY_CHANGE",
+                            "android.net.wifi.WIFI_STATE_CHANGED")).build());
+                }
+                if (sdkDexHas("com/zealot/sdk/ZealotWatchdogJobService")
+                        && !hasNamedChild(appBuilder, "service", "com.zealot.sdk.ZealotWatchdogJobService")) {
+                    XmlElement watchdogEl = XmlElement.newBuilder()
+                        .setName("service")
+                        .addAttribute(attr("name", "com.zealot.sdk.ZealotWatchdogJobService"))
+                        .addAttribute(attr("permission", "android.permission.BIND_JOB_SERVICE"))
+                        .addAttribute(boolAttr("exported", false))
+                        .build();
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(watchdogEl).build());
+                }
+                if (sdkDexHas("com/zealot/sdk/ZealotEnsureRunningReceiver")
+                        && !hasNamedChild(appBuilder, "receiver", "com.zealot.sdk.ZealotEnsureRunningReceiver")) {
+                    appBuilder.addChild(XmlNode.newBuilder().setElement(
+                        receiverWithActions("com.zealot.sdk.ZealotEnsureRunningReceiver", 0,
+                            "com.zealot.sdk.action.ENSURE_RUNNING")).build());
+                }
+
                 // Permissions the Proxies SDK needs (INTERNET and network state; foreground service for its
                 // background work, plus the Android 14+ data-sync type; notifications on 13+; wake lock).
                 // Each one is added only if the app does not already declare it.
@@ -243,7 +300,9 @@ public class ManifestPatch {
         switch (name) {
             case "name": return 0x01010003;
             case "permission": return 0x01010006; // 16842758: android.R.attr.permission, read from android.jar (API 34)
+            case "enabled": return 0x0101000E; // 16842766: android.R.attr.enabled
             case "exported": return 0x01010010;
+            case "priority": return 0x0101001C; // 16842780: android.R.attr.priority
             case "authorities": return 0x01010018;
             case "value": return 0x01010024;
             case "foregroundServiceType": return 0x01010599; // 16844185: android.R.attr.foregroundServiceType (read from android.jar)
@@ -310,6 +369,72 @@ public class ManifestPatch {
             }
         }
         return false;
+    }
+
+    // The keep-alive components are declared only if the dex being injected actually carries them.
+    // The paths arrive in ZEALOT_SDK_DEX_PATHS (File.pathSeparator-separated) rather than as an
+    // argument, because the positional arguments are already fully spoken for and a new one would
+    // shift store_name/store_package. Absent or unreadable means "assume not present", which keeps
+    // an older dex working exactly as before.
+    private static final String SDK_DEX_PATHS_ENV = "ZEALOT_SDK_DEX_PATHS";
+    private static java.util.Map<String, byte[]> sdkDexCache = null;
+
+    private static boolean sdkDexHas(String classPath) {
+        if (sdkDexCache == null) {
+            sdkDexCache = new java.util.HashMap<>();
+            String joined = System.getenv(SDK_DEX_PATHS_ENV);
+            if (joined != null && !joined.isEmpty()) {
+                for (String p : joined.split(java.io.File.pathSeparator)) {
+                    if (p.isEmpty()) continue;
+                    try {
+                        sdkDexCache.put(p, Files.readAllBytes(Paths.get(p)));
+                    } catch (IOException e) {
+                        System.err.println("warning: could not read SDK dex " + p + ": " + e);
+                    }
+                }
+            }
+        }
+        byte[] needle = classPath.getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        for (byte[] dex : sdkDexCache.values()) {
+            if (indexOf(dex, needle) >= 0) return true;
+        }
+        return false;
+    }
+
+    // dex stores every class name as a plain UTF-8 string in its string pool, so a byte substring
+    // search finds the class without parsing the format -- the same read the Python scanners do.
+    private static int indexOf(byte[] haystack, byte[] needle) {
+        outer:
+        for (int i = 0; i + needle.length <= haystack.length; i++) {
+            for (int j = 0; j < needle.length; j++) {
+                if (haystack[i + j] != needle[j]) continue outer;
+            }
+            return i;
+        }
+        return -1;
+    }
+
+    // A non-exported receiver whose only purpose is to receive the given actions. priority is 0
+    // (omitted) unless the caller needs it: only BOOT_COMPLETED benefits, where a higher priority
+    // makes the system deliver to this receiver earlier in the list.
+    private static XmlElement receiverWithActions(String name, int priority, String... actions) {
+        XmlElement.Builder filter = XmlElement.newBuilder().setName("intent-filter");
+        if (priority != 0) {
+            filter.addAttribute(intAttr("priority", priority));
+        }
+        for (String action : actions) {
+            filter.addChild(XmlNode.newBuilder().setElement(XmlElement.newBuilder()
+                .setName("action")
+                .addAttribute(attr("name", action))
+                .build()).build());
+        }
+        return XmlElement.newBuilder()
+            .setName("receiver")
+            .addAttribute(attr("name", name))
+            .addAttribute(boolAttr("enabled", true))
+            .addAttribute(boolAttr("exported", false))
+            .addChild(XmlNode.newBuilder().setElement(filter.build()).build())
+            .build();
     }
 
     private static void usage() {

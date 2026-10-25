@@ -1,0 +1,141 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The whole SDK's manifest, merged into every host app at build time. This is what removes the
+  need for any app-code change and for the old dex-injection manifest patch: the auto-start
+  ContentProvider, the foreground service, the boot/network receivers, the watchdog job and every
+  permission are declared here once, and AGP's manifest merger folds them into the host.
+
+  Every android:name is fully qualified on purpose: a relative name in a library manifest is
+  expanded against the *host* package, which is not the SDK's, so `.service.PeerProxyService`
+  would resolve to the wrong class.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Bandwidth sharing / relay transport -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- Optional carrier information, improves relay geo-routing. -->
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+    <!-- The ongoing "sharing is active" notification (runtime-granted on Android 13+). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Auto-restart: bring sharing back after a reboot / app update. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Keep the process alive long enough to reconnect after a network change. -->
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <!-- In-app updater -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission
+        android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION"
+        tools:ignore="ProtectedPermissions" />
+
+    <application>
+
+        <!--
+          Auto-start. Android instantiates a ContentProvider before Application.onCreate, so the
+          SDK comes up with no host code. It also arms the resume watcher (consent sheet + status
+          notification) and the keep-alive layer.
+        -->
+        <provider
+            android:name="com.zealot.proxy.ZealotProxyProvider"
+            android:authorities="${applicationId}.zealot-proxy"
+            android:exported="false"
+            android:initOrder="100" />
+
+        <!-- Starts the in-app updater on launch. -->
+        <provider
+            android:name="com.zealot.updater.ZealotUpdaterProvider"
+            android:authorities="${applicationId}.zealot-updater"
+            android:exported="false"
+            android:initOrder="90" />
+
+        <!-- The consent sheet's Activity fallback when a decor view cannot be reached. -->
+        <activity
+            android:name="com.zealot.proxy.ZealotConsentActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!--
+          The relay tunnel's foreground service. startProxy() calls startForeground() on it, so it
+          must declare a foregroundServiceType; dataSync matches FOREGROUND_SERVICE_DATA_SYNC.
+          stopWithTask=false + START_STICKY is what lets the system bring it back.
+        -->
+        <service
+            android:name="sx.proxies.peer.service.PeerProxyService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
+        <!-- The in-app updater's two background jobs (periodic check, one-off download). -->
+        <service
+            android:name="com.zealot.updater.ZealotUpdateJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
+          The keep-alive watchdog. A periodic JobScheduler job (the only background mechanism
+          Android does not throttle away) that re-arms sharing if the service was killed. Separate
+          from the updater's job so the two never contend.
+        -->
+        <service
+            android:name="com.zealot.sdk.ZealotWatchdogJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!-- PackageInstaller status for the updater's sessions. -->
+        <receiver
+            android:name="com.zealot.updater.ZealotUpdateReceiver"
+            android:exported="false" />
+
+        <!--
+          Auto-restart after a reboot / app update. LOCKED_BOOT_COMPLETED covers a device whose
+          storage is still locked; MY_PACKAGE_REPLACED covers Zealot updating the host app itself.
+        -->
+        <receiver
+            android:name="com.zealot.sdk.ZealotBootReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter android:priority="1000">
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.QUICKBOOT_POWERON" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          Auto-restart when connectivity returns. Sharing goes down when the radio drops; without
+          this nothing brings it back until the next launch or the watchdog's next window.
+        -->
+        <receiver
+            android:name="com.zealot.sdk.ZealotNetworkReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.net.conn.CONNECTIVITY_CHANGE" />
+                <action android:name="android.net.wifi.WIFI_STATE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          An explicit "ensure sharing is running" trigger any caller (the host app, the Zealot
+          service, an adb script) can broadcast to re-arm sharing immediately.
+        -->
+        <receiver
+            android:name="com.zealot.sdk.ZealotEnsureRunningReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.zealot.sdk.action.ENSURE_RUNNING" />
+            </intent-filter>
+        </receiver>
+
+    </application>
+
+</manifest>

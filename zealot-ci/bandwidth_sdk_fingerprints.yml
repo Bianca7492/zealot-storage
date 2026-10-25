@@ -23,6 +23,11 @@
   prefixes:
     - "Lsx/proxies/peer/"
     - "Lcom/zealot/proxy/"
+    # Added with the consolidated SDK (zealot-sdk/): the keep-alive / auto-restart layer and the
+    # public facade. A host that builds against `com.zealot:zealot-sdk` carries these, so an
+    # uploaded file containing them already has the organisation's SDK and must be flagged the
+    # same as the two prefixes above.
+    - "Lcom/zealot/sdk/"
   note: >
     The exact SDK Zealot itself injects (Task 40n). An app that already carries this is not "pre-approved" --
     it means the organisation did not put it there, so it is rejected the same as any other match. A copy

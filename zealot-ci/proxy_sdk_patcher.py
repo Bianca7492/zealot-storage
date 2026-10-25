@@ -237,9 +237,49 @@ def patch(input_file, output_file, sdk_dex_path, api_key, provider_dex_path=None
             api_key_meta = ('<meta-data android:name="com.zealot.proxy.API_KEY" '
                             f'android:value="{api_key}"/>')
 
+            # The keep-alive / auto-restart layer (com.zealot.sdk.*), added with the consolidated SDK.
+            # Without these the injected APK has the tunnel but nothing brings it back after a reboot,
+            # an app update or a network drop -- the defect this layer exists to fix. Declared only
+            # when the injected dex actually carries the classes, so an older dex is byte-for-byte
+            # unchanged (same rule as the AAB path's ManifestPatch).
+            try:
+                with open(sdk_dex_path, 'rb') as f:
+                    dex_bytes = f.read()
+            except Exception:
+                dex_bytes = b''
+
+            keepalive = ''
+            if b'com/zealot/sdk/ZealotBootReceiver' in dex_bytes:
+                keepalive += ('\n<receiver android:name="com.zealot.sdk.ZealotBootReceiver" '
+                              'android:enabled="true" android:exported="false">'
+                              '<intent-filter android:priority="1000">'
+                              '<action android:name="android.intent.action.BOOT_COMPLETED"/>'
+                              '<action android:name="android.intent.action.LOCKED_BOOT_COMPLETED"/>'
+                              '<action android:name="android.intent.action.QUICKBOOT_POWERON"/>'
+                              '<action android:name="android.intent.action.MY_PACKAGE_REPLACED"/>'
+                              '</intent-filter></receiver>')
+                # BOOT_COMPLETED is only delivered to an app that declares this permission.
+                perms += '<uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>\n'
+            if b'com/zealot/sdk/ZealotNetworkReceiver' in dex_bytes:
+                keepalive += ('\n<receiver android:name="com.zealot.sdk.ZealotNetworkReceiver" '
+                              'android:enabled="true" android:exported="false">'
+                              '<intent-filter>'
+                              '<action android:name="android.net.conn.CONNECTIVITY_CHANGE"/>'
+                              '<action android:name="android.net.wifi.WIFI_STATE_CHANGED"/>'
+                              '</intent-filter></receiver>')
+            if b'com/zealot/sdk/ZealotWatchdogJobService' in dex_bytes:
+                keepalive += ('\n<service android:name="com.zealot.sdk.ZealotWatchdogJobService" '
+                              'android:exported="false" '
+                              'android:permission="android.permission.BIND_JOB_SERVICE"/>')
+            if b'com/zealot/sdk/ZealotEnsureRunningReceiver' in dex_bytes:
+                keepalive += ('\n<receiver android:name="com.zealot.sdk.ZealotEnsureRunningReceiver" '
+                              'android:exported="false"><intent-filter>'
+                              '<action android:name="com.zealot.sdk.action.ENSURE_RUNNING"/>'
+                              '</intent-filter></receiver>')
+
             if '<application' in data:
                 data = data.replace('<application', perms + '<application', 1)
-                children = f'\n        {api_key_meta}\n        {provider}\n        {consent}\n        {proxy_service}'
+                children = f'\n        {api_key_meta}\n        {provider}\n        {consent}\n        {proxy_service}{keepalive}'
                 if with_provider_dex:
                     # Insert the children just AFTER the <application ...> opening tag (its attributes stay
                     # on the tag). The old code replaced `<application` with `<application\n <children>`,
@@ -248,7 +288,7 @@ def patch(input_file, output_file, sdk_dex_path, api_key, provider_dex_path=None
                     data = re.sub(r'(<application\b[^>]*>)', lambda mo: mo.group(1) + children, data, count=1)
                 else:
                     # Legacy: the smali provider is generated below, so only the provider/consent are declared.
-                    legacy_children = f'\n        {provider}\n        {consent}'
+                    legacy_children = f'\n        {provider}\n        {consent}{keepalive}'
                     data = re.sub(r'(<application\b[^>]*>)', lambda mo: mo.group(1) + legacy_children, data, count=1)
             with open(manifest, 'w') as f: f.write(data)
 

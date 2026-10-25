@@ -58,7 +58,7 @@ def _ensure_manifest_patch_compiled(bundletool_jar):
 
 
 def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, updater_base_url=None,
-                    store_name=None, store_package=None):
+                    store_name=None, store_package=None, sdk_dex_paths=None):
     _ensure_manifest_patch_compiled(bundletool_jar)
     cp = os.pathsep.join([MANIFEST_PATCH_BUILD_DIR, bundletool_jar])
     cmd = ['java', '-cp', cp, 'ManifestPatch', 'patch', manifest_pb_path, output_pb_path, api_key]
@@ -70,7 +70,11 @@ def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, u
         if store_name or store_package:
             cmd.append(store_name or '')
             cmd.append(store_package or '')
-    subprocess.run(cmd, check=True)
+    # The keep-alive components (receivers, watchdog) are declared only when the dex being injected
+    # actually carries them. Passed by environment so the positional arguments stay as they are.
+    env = dict(os.environ)
+    env['ZEALOT_SDK_DEX_PATHS'] = os.pathsep.join(sdk_dex_paths or [])
+    subprocess.run(cmd, check=True, env=env)
 
 
 def _next_free_dex_name(aab_zip):
@@ -130,7 +134,7 @@ def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater
             f.write(manifest_data)
 
         _patch_manifest(manifest_in, manifest_out, api_key, bundletool_jar, updater_base_url,
-                        store_name, store_package)
+                        store_name, store_package, sdk_dex_paths)
 
         new_dex_mappings = []
         for dex_path in sdk_dex_paths:
