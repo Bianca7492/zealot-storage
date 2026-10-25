@@ -94,3 +94,28 @@ final signing step; without it the patch still completes and the intermediate AP
 Tag `zealot-sdk-v<version>` and push; `publish-sdk.yml` publishes to GitHub Packages with its own
 `GITHUB_TOKEN`. The version default lives in `zealot-sdk/gradle.properties`
 (`zealotSdkVersion`), overridable with `-PzealotSdkVersion=`.
+
+## Repository home and the account migration
+
+This project moved from the `christiana-angel` account (suspended by GitHub, so the repo and its
+Maven registry are unreachable) to **`Bianca7492`**. Everything self-referential now derives from
+one value:
+
+- `canonicalRepoSlug` in `zealot-sdk/sdk/build.gradle.kts` — feeds the POM's `url`, the `scm`
+  links and the GitHub Packages registry URL.
+- In CI nothing needs changing: `GITHUB_REPOSITORY` is already `owner/repo`, and the code prefers
+  it over the fallback.
+
+To repoint again, change that one fallback and the README's Gradle snippet. Do **not** bulk
+replace `christiana-angel` in `harvest-tenant-apk.yml`: its three references name
+`christiana-angel/Storeapp`, a *different* repo (the tenant app source that dispatches the
+bundle), not this one.
+
+The sibling repos were migrated the same way — `zealot`, `Storeapp`, `D-Store`,
+`appstore-metadata`, `distr` — all now under `Bianca7492` as private repos. They arrived as
+shallow single-commit clones and were each rewritten into a real root commit (a shallow clone
+cannot be pushed: git refuses with "shallow update not allowed"), so their history is a single
+commit, not the upstream history.
+
+`bolivian-peru/android-peer-sdk` is a **separate, live** upstream and is not part of this
+account; do not migrate or repoint it.
