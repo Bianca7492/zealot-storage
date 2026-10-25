@@ -113,10 +113,10 @@ one value:
 - In CI nothing needs changing: `GITHUB_REPOSITORY` is already `owner/repo`, and the code prefers
   it over the fallback.
 
-To repoint again, change that one fallback and the README's Gradle snippet. Do **not** bulk
-replace `christiana-angel` in `harvest-tenant-apk.yml`: its three references name
-`christiana-angel/Storeapp`, a *different* repo (the tenant app source that dispatches the
-bundle), not this one.
+To repoint again, change that one fallback and the README's Gradle snippet.
+`harvest-tenant-apk.yml` names `Bianca7492/Storeapp` in three places — a *different* repo (the
+tenant app source that dispatches the bundle), not this one. It was repointed in the same move;
+keep the two in step, because the workflow's ownership check fails loudly if they drift apart.
 
 The sibling repos were migrated the same way — `zealot`, `Storeapp`, `D-Store`,
 `appstore-metadata`, `distr` — all now under `Bianca7492` as private repos. They arrived as
