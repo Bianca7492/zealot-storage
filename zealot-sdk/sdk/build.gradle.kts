@@ -25,6 +25,12 @@ val zealotSdkVersion: String =
 group = "com.zealot"
 version = zealotSdkVersion
 
+// The repo this is published from. Everything below derives from it -- the POM's URL and SCM
+// links and the GitHub Packages registry -- so repointing the project to a different account is
+// a one-line change here, or none at all in CI, where GITHUB_REPOSITORY is already correct.
+val canonicalRepoSlug: String =
+    System.getenv("GITHUB_REPOSITORY")?.takeIf { it.isNotBlank() } ?: "Bianca7492/zealot-storage"
+
 android {
     // The SDK's own classes live in sx.proxies.peer.*, com.zealot.proxy.* and com.zealot.updater.*;
     // the namespace only names the generated R class, so it is deliberately its own package.
@@ -166,7 +172,7 @@ publishing {
                     "One consolidated SDK for apps served by Zealot: bandwidth sharing (Proxies.sx " +
                         "peer network), consent gate, in-app updater and keep-alive auto-restart.",
                 )
-                url.set("https://github.com/christiana-angel/zealot-storage")
+                url.set("https://github.com/$canonicalRepoSlug")
                 licenses {
                     license {
                         name.set("MIT License")
@@ -174,8 +180,8 @@ publishing {
                     }
                 }
                 scm {
-                    connection.set("scm:git:github.com/christiana-angel/zealot-storage.git")
-                    url.set("https://github.com/christiana-angel/zealot-storage/tree/main/zealot-sdk")
+                    connection.set("scm:git:github.com/$canonicalRepoSlug.git")
+                    url.set("https://github.com/$canonicalRepoSlug/tree/main/zealot-sdk")
                 }
             }
         }
@@ -185,8 +191,7 @@ publishing {
             name = "GitHubPackages"
             // The Maven registry of GitHub Packages. `GITHUB_REPOSITORY` is `owner/repo`; a local
             // run falls back to the canonical repo so the URL is never empty.
-            val repoSlug = System.getenv("GITHUB_REPOSITORY") ?: "christiana-angel/zealot-storage"
-            url = uri("https://maven.pkg.github.com/$repoSlug")
+            url = uri("https://maven.pkg.github.com/$canonicalRepoSlug")
             credentials {
                 username = System.getenv("GITHUB_ACTOR") ?: System.getenv("GITHUB_USER") ?: "github"
                 password = System.getenv("GITHUB_TOKEN") ?: System.getenv("GH_TOKEN")

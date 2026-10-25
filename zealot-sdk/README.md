@@ -76,7 +76,7 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         maven {
-            url = uri("https://maven.pkg.github.com/christiana-angel/zealot-storage")
+            url = uri("https://maven.pkg.github.com/Bianca7492/zealot-storage")
             credentials {
                 username = providers.gradleProperty("gpr.user").orNull
                 password = providers.gradleProperty("gpr.key").orNull
