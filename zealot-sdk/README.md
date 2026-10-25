@@ -43,6 +43,18 @@ stop and never resume. There were three separate causes, and all three are fixed
    after killing a `START_STICKY` service; the old code returned `START_NOT_STICKY` there and the
    tunnel never came back.
    → `PeerProxyService` persists its start parameters and resumes from them.
+5. **The reconnect loops stacked.** `connect()` closes the socket it is replacing, and OkHttp
+   reports that close on the *old* listener; that callback ran the disconnect path and scheduled a
+   second reconnect while the new socket was already dialling. Each trigger added another loop, each
+   closing the other's socket, so the device stayed registered but never held a tunnel.
+   → `RelayConnection` stamps every dial with a session generation and ignores callbacks from a
+   superseded session; `PeerProxyService` closes the connection it replaces and keeps only the
+   newest start; `ProxiesPeerSDK.start()` coalesces duplicate triggers.
+6. **The keep-alive layer gave up when the SDK was not yet up.** A boot receiver or the watchdog
+   runs in a fresh process with no Activity, where the auto-start provider may not have won its
+   race; the old code deferred to it and returned.
+   → `ZealotKeepAlive` initializes the SDK from the persisted key itself, the way the Pawns SDK's
+   boot receiver does (`PawnsCore.Initialize` then `StartMainRoutine`).
 
 A `JobScheduler` watchdog (`ZealotWatchdogJobService`, periodic, `setPersisted(true)`) is the
 backstop for everything the receivers cannot see.
@@ -89,7 +101,7 @@ dependencyResolutionManagement {
 ```kotlin
 // app/build.gradle.kts
 dependencies {
-    implementation("com.zealot:zealot-sdk:1.4.0")
+    implementation("com.zealot:zealot-sdk:1.5.0")
 }
 ```
 
@@ -160,8 +172,8 @@ component.
 Publishing is automated. Push a tag and `.github/workflows/publish-sdk.yml` publishes that version:
 
 ```bash
-git tag zealot-sdk-v1.4.0
-git push origin zealot-sdk-v1.4.0
+git tag zealot-sdk-v1.5.0
+git push origin zealot-sdk-v1.5.0
 ```
 
 The workflow authenticates with its own `GITHUB_TOKEN` (`packages: write`), so there is no secret

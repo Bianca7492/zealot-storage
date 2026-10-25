@@ -159,4 +159,102 @@ class ZealotAutoRestartWiringTest {
             !service.contains("\"Proxies.sx Peer\""),
         )
     }
+
+    /**
+     * The reconnect storm. `connect()` closes the socket it is replacing, and OkHttp reports that
+     * as a failure/close on the OLD listener; when those callbacks ran the disconnect path they
+     * scheduled a second reconnect loop on top of the one already dialling. Every trigger then
+     * added another, so the device never held a tunnel -- "it does not come back up on its own".
+     * The session generation is what makes a superseded socket's callbacks inert.
+     */
+    @Test
+    fun `a superseded session cannot schedule another reconnect`() {
+        val relay = code("src/main/java/sx/proxies/peer/network/RelayConnection.kt")
+        assertTrue(
+            "the session generation must exist",
+            relay.contains("sessionGeneration"),
+        )
+        assertTrue(
+            "connect() must claim a new generation before closing the old socket",
+            Regex("""fun connect\(\)[\s\S]{0,900}sessionGeneration""").containsMatchIn(relay),
+        )
+        // Both terminal callbacks must check the generation before doing anything.
+        for (callback in listOf("onFailure", "onClosed")) {
+            assertTrue(
+                "$callback must ignore a superseded session",
+                Regex("""override fun $callback[\s\S]{0,600}generation != sessionGeneration""")
+                    .containsMatchIn(relay),
+            )
+        }
+        assertTrue(
+            "handleDisconnect must not reconnect once sharing is off",
+            Regex("""fun handleDisconnect\(\)[\s\S]{0,300}shouldReconnect""").containsMatchIn(relay),
+        )
+    }
+
+    /**
+     * The service used to build a new RelayConnection on every start and simply drop the old
+     * reference, leaking its socket and its reconnect loop; and its stop path used startService(),
+     * which throws in the background on Android 8+ so sharing was never actually stopped.
+     */
+    @Test
+    fun `the service replaces its connection cleanly and stops from the background`() {
+        val service = code("src/main/java/sx/proxies/peer/service/PeerProxyService.kt")
+        assertTrue(
+            "a replaced connection must be disconnected, not just dropped",
+            Regex("""fun startProxy[\s\S]{0,1500}relayConnection\?\.disconnect\(\)""")
+                .containsMatchIn(service),
+        )
+        assertTrue(
+            "the connection coroutine must be guarded by a start generation",
+            service.contains("startGeneration") &&
+                Regex("""generation != startGeneration""").containsMatchIn(service),
+        )
+        assertTrue(
+            "stop() must not startService (illegal from the background on Android 8+)",
+            Regex("""fun stop\(context: Context\)[\s\S]{0,500}stopService""").containsMatchIn(service),
+        )
+        assertTrue(
+            "stop() must not use startService",
+            !Regex("""fun stop\(context: Context\)[\s\S]{0,500}startService""").containsMatchIn(service),
+        )
+    }
+
+    /**
+     * The keep-alive layer used to give up when the SDK was not yet initialized, deferring to the
+     * auto-start provider -- which is exactly the case a boot receiver or the watchdog runs in.
+     * Pawns initializes from its stored key on that path (PawnsCore.Initialize then
+     * StartMainRoutine); this SDK must do the same.
+     */
+    @Test
+    fun `the keep-alive layer initializes the SDK itself instead of giving up`() {
+        val keepAlive = code("src/main/java/com/zealot/sdk/ZealotKeepAlive.java")
+        assertTrue(
+            "ensureRunning must initialize the SDK when getInstance() has nothing",
+            Regex("""IllegalStateException notInitialized[\s\S]{0,600}initializeIfNeeded""")
+                .containsMatchIn(keepAlive),
+        )
+        assertTrue(
+            "the give-up path must be gone",
+            !keepAlive.contains("the auto-start provider will do it"),
+        )
+        val provider = source("src/main/java/com/zealot/proxy/ZealotProxyProvider.java")
+        assertTrue(
+            "the provider must expose an initializeIfNeeded entry point",
+            provider.contains("public static boolean initializeIfNeeded(Context context)"),
+        )
+    }
+
+    @Test
+    fun `start coalesces duplicate triggers`() {
+        val sdk = code("src/main/java/sx/proxies/peer/ProxiesPeerSDK.kt")
+        assertTrue(
+            "start() must be guarded against a duplicate in-flight start",
+            Regex("""fun start\(\)[\s\S]{0,900}starting""").containsMatchIn(sdk),
+        )
+        assertTrue(
+            "the guard must be released even when registration fails",
+            Regex("""finally[\s\S]{0,200}starting = false""").containsMatchIn(sdk),
+        )
+    }
 }

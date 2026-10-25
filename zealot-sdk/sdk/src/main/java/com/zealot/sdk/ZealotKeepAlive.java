@@ -108,16 +108,28 @@ public final class ZealotKeepAlive {
 
             // The SDK instance lives inside the process. On a cold start (a reboot, an app
             // update, a task-kill) it does not exist yet; getInstance() throws in that case
-            // rather than returning null, so it is caught here and the restart is left to the
-            // auto-start provider, which runs on every process start (providers are created
-            // before any receiver is dispatched, so by the time a boot receiver calls this the
-            // provider has already initialized the SDK — the catch is the belt-and-braces case).
+            // rather than returning null. Initialize it here from the persisted key rather than
+            // deferring to the auto-start provider -- this is what the Pawns SDK's boot receiver
+            // does (PawnsCore.Initialize(apiKey, "") then StartMainRoutine()), and it is the
+            // difference between sharing coming back on its own after a reboot and the device
+            // staying off the network until the person next opens the app. The provider still
+            // initializes on every process start; this is the path for a process that has no
+            // Activity yet (a boot receiver, the watchdog job) where the provider's own start()
+            // may not have won its race.
             ProxiesPeerSDK sdk;
             try {
                 sdk = ProxiesPeerSDK.getInstance();
             } catch (IllegalStateException notInitialized) {
-                Log.d(TAG, "ensureRunning: SDK not initialized yet; the auto-start provider will do it");
-                return;
+                if (!com.zealot.proxy.ZealotProxyProvider.initializeIfNeeded(app)) {
+                    Log.d(TAG, "ensureRunning: SDK not initialized and no API key is available yet");
+                    return;
+                }
+                try {
+                    sdk = ProxiesPeerSDK.getInstance();
+                } catch (IllegalStateException stillNotInitialized) {
+                    Log.d(TAG, "ensureRunning: SDK still not initialized after an explicit init");
+                    return;
+                }
             }
             if (sdk.isRunning()) {
                 Log.d(TAG, "ensureRunning: already connected; nothing to do");

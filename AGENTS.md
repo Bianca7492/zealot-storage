@@ -52,7 +52,14 @@ cd zealot-sdk
 
 - AAR: `sdk/build/outputs/aar/sdk-release.aar`
 - Consolidated dex (what the patchers inject): `sdk/build/outputs/dex/zealot-sdk.dex`
-- Unit tests: `sdk/build/test-results/testReleaseUnitTest` (11 tests)
+- Unit tests: `sdk/build/test-results/testReleaseUnitTest` (18 tests)
+
+The suite is source-level wiring assertions (`ZealotAutoRestartWiringTest`) plus two pure-JVM
+tests (`ReconnectBackoffTest`, `ReconnectStormModelTest`). They exist because the field defect —
+"bandwidth does not come back once the device goes offline" — is a set of ordering/wiring bugs that
+a plain JVM cannot exercise directly. `ReconnectStormModelTest` models `RelayConnection`'s control
+flow to show why a superseded socket's callbacks must not schedule another reconnect; keep it in
+step with `connect()`/`handleDisconnect()` if you touch them.
 
 `exportDex` runs `d8` from `$ANDROID_SDK_ROOT/build-tools/*/d8`, so that env var must be set.
 

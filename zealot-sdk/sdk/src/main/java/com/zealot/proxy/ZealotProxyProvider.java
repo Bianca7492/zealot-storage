@@ -151,6 +151,47 @@ public class ZealotProxyProvider extends ContentProvider {
     /** True once the translucent-Activity fallback has been tried, so it is only tried once. */
     private static volatile boolean consentActivityLaunched = false;
 
+    /**
+     * Initializes the SDK if it is not already up, and reports whether it is now available.
+     *
+     * This is the SDK's own "initialize from the persisted key" entry point, mirroring what the
+     * Pawns SDK does from its boot receiver: {@code PawnsCore.Initialize(apiKey, "")} followed by
+     * {@code StartMainRoutine()}. It exists because {@code onCreate} is not the only way the SDK
+     * has to come up. A boot receiver or the watchdog job can run in a fresh process before any
+     * Activity exists, and the provider's own start() can lose its race with the app's first
+     * Activity; in both cases nothing had initialized the SDK, and the keep-alive layer used to
+     * give up ("the auto-start provider will do it") -- which is how a device stayed off the peer
+     * network until the person happened to open the app.
+     *
+     * Safe to call from anywhere, any number of times: start() is latched, and a second call is a
+     * cheap no-op once the instance exists. Never throws.
+     */
+    public static boolean initializeIfNeeded(Context context) {
+        if (context == null) return false;
+        try {
+            if (!isInitialized()) start(context);
+            return isInitialized();
+        } catch (Throwable t) {
+            Log.e(TAG, "initializeIfNeeded failed", t);
+            return false;
+        }
+    }
+
+    /**
+     * True once the SDK's own {@code getInstance()} returns an instance. Checked through reflection
+     * for the same reason everything else here is: this file has no compile-time dependency on the
+     * SDK classes.
+     */
+    public static boolean isInitialized() {
+        try {
+            Class<?> sdkClass = Class.forName(SDK_CLASS);
+            Method getInstance = sdkClass.getMethod("getInstance");
+            return getInstance.invoke(null) != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** Reads the stored consent choice. Shared by the provider, the overlay and the Activity. */
     static boolean isConsentAccepted(Context context) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

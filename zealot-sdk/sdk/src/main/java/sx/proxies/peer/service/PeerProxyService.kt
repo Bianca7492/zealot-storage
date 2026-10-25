@@ -53,10 +53,16 @@ class PeerProxyService : Service() {
 
         @JvmStatic
         fun stop(context: Context) {
-            val intent = Intent(context, PeerProxyService::class.java).apply {
-                action = ACTION_STOP
+            // stopService, not startService-with-ACTION_STOP. Every restart path funnels through
+            // here (ZealotKeepAlive.setEnabled(false), the notification's Stop action), and both
+            // of those can run while the app is in the background -- where startService() throws
+            // IllegalStateException on Android 8+ and the service was never actually stopped.
+            // onDestroy() does the teardown.
+            try {
+                context.stopService(Intent(context, PeerProxyService::class.java))
+            } catch (t: Throwable) {
+                Log.e(TAG, "stopService failed", t)
             }
-            context.startService(intent)
         }
     }
 
@@ -64,6 +70,14 @@ class PeerProxyService : Service() {
     private var relayConnection: RelayConnection? = null
     private var localProxyServer: LocalProxyServer? = null
     private var wakeLock: PowerManager.WakeLock? = null
+
+    /**
+     * Bumped by every [startProxy] and by [stopProxy]. The connection coroutine captures it before
+     * it does any work and refuses to publish a connection if a newer start (or a stop) has since
+     * taken over -- so a slow DNS lookup cannot leave an orphaned socket dialling the relay after
+     * the service has already moved on to a newer one.
+     */
+    @Volatile private var startGeneration = 0
 
     // Last START parameters, persisted so the service can restart itself. When Android kills a
     // service that returned START_STICKY it re-delivers onStartCommand with a NULL intent; the
@@ -132,13 +146,33 @@ class PeerProxyService : Service() {
     private fun startProxy(token: String, relayUrl: String, relayPinned: Boolean) {
         Log.d(TAG, "Starting proxy service")
 
+        // This start supersedes any earlier one still in flight.
+        val generation = ++startGeneration
+
+        // A restart trigger (the watchdog, the network receiver, ensureRunning) can land here
+        // while a previous connection is still live. Replacing relayConnection without closing the
+        // old one leaked its WebSocket and its reconnect loop: the old object kept redialling the
+        // relay in the background, so the device opened more and more sessions it never used. Tear
+        // the previous one down first; disconnect() also stops its reconnect loop.
+        try {
+            relayConnection?.disconnect()
+        } catch (t: Throwable) {
+            Log.e(TAG, "Failed to close the previous relay connection", t)
+        }
+        relayConnection = null
+        localProxyServer?.stop()
+        localProxyServer = null
+
         // Start foreground immediately
         startForeground(NOTIFICATION_ID, createNotification("Connecting..."))
 
         serviceScope.launch {
             try {
-                // Initialize relay connection
-                relayConnection = RelayConnection(
+                // Built into a local and published only while this start is still the current one.
+                // Reading the mutable field here instead would let a second startProxy() swap it out
+                // from under this coroutine, so both would connect the SAME RelayConnection and open
+                // two sockets -- the same storm the generation guard prevents inside it.
+                val connection = RelayConnection(
                     context = applicationContext,
                     relayUrl = relayUrl,
                     relayPinned = relayPinned,
@@ -166,8 +200,15 @@ class PeerProxyService : Service() {
                         updateNotificationStats()
                     }
                 )
-
-                relayConnection?.connect()
+                if (generation != startGeneration) {
+                    // A newer start (or a stop) took over while this one was being built. Drop it
+                    // instead of connecting a second tunnel nobody will close.
+                    Log.d(TAG, "Discarding a superseded connection")
+                    connection.disconnect()
+                    return@launch
+                }
+                relayConnection = connection
+                connection.connect()
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start proxy", e)
                 updateNotification("Connection failed: ${e.message}")
@@ -263,6 +304,11 @@ class PeerProxyService : Service() {
 
     private fun stopProxy() {
         Log.d(TAG, "Stopping proxy service")
+        // Supersede any start still in flight, so a connection being built right now is discarded
+        // rather than connected after the service has been asked to stop.
+        startGeneration++
+        // Should already be torn down by startProxy's replace path, but disconnect() is
+        // idempotent and this is the one place that must never leak a loop.
         relayConnection?.disconnect()
         relayConnection = null
         localProxyServer?.stop()

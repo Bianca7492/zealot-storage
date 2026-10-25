@@ -52,12 +52,15 @@ class ProxiesPeerSDK private constructor(
          * "1.0.1" (hardcoded, never updated despite multiple releases)
          * to track gradle artifact version. Bumped to 1.3.0 for
          * multi-region relay routing (geo-assign + relay_redirect),
-         * matching the Node reference SDK that introduced it.
+         * matching the Node reference SDK that introduced it. Bumped to
+         * 1.5.0 with the reconnect-storm fix (superseded-socket callbacks
+         * no longer stack reconnect loops), so a 1.5.0 install is
+         * distinguishable from the 1.4.0 artifact that shipped it.
          *
          * `internal` so RelayConnection can echo it in the device_info
          * handshake without re-declaring the string.
          */
-        internal const val SDK_VERSION = "1.3.2"
+        internal const val SDK_VERSION = "1.5.0"
         // Production URLs
         private const val DEFAULT_API_URL = "https://api.proxies.sx/v1"
         private const val DEFAULT_RELAY_URL = "wss://relay.proxies.sx"
@@ -186,11 +189,31 @@ class ProxiesPeerSDK private constructor(
         assignedRelay = prefs.getString("relay_url", null)
     }
 
+    /** True while a start() is between its entry and its registration/connection work. */
+    @Volatile private var starting = false
+
     /**
      * Start the bandwidth sharing service.
      * Registers the device if needed and connects to the relay.
      */
     fun start() {
+        // A restart trigger (the watchdog, the connectivity receiver, the consent gate, an app
+        // calling ensureRunning) can fire while a previous start() is still registering. Without
+        // this guard each one launches another registration+connect coroutine against the same
+        // service; the service-side startGeneration keeps only the last connection, but the
+        // redundant register/token work still races and can land a stale token. Coalesce instead:
+        // one start at a time, and re-arming while already CONNECTED is a no-op.
+        synchronized(this) {
+            if (starting) {
+                Log.d(TAG, "start() already in progress; ignoring the duplicate")
+                return
+            }
+            if (currentStatus == Status.CONNECTED) {
+                Log.d(TAG, "Already connected; ignoring start()")
+                return
+            }
+            starting = true
+        }
         Log.d(TAG, "Starting SDK")
         updateStatus(Status.CONNECTING)
 
@@ -228,6 +251,10 @@ class ProxiesPeerSDK private constructor(
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to start", e)
                 updateStatus(Status.ERROR)
+            } finally {
+                // Released whatever the outcome, so a failed registration does not wedge the
+                // guard and block the next restart trigger (the watchdog must be able to retry).
+                starting = false
             }
         }
 

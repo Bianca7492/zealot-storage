@@ -112,7 +112,21 @@ class RelayConnection(
     private val gson = Gson()
     private var scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private var deviceId: String? = null
+    /**
+     * The live session's generation. Bumped once per [connect], and every WebSocket callback
+     * carries the generation it was created with; a callback from an older generation is ignored.
+     *
+     * This is the fix for the reconnect storm. [connect] deliberately closes the previous socket,
+     * and OkHttp answers that with `onFailure`/`onClosed` on the OLD listener. Those callbacks used
+     * to run [handleDisconnect] again, which scheduled ANOTHER reconnect while the new socket was
+     * already dialing -- so every trigger (a network change, the watchdog, a relay redirect, a
+     * heartbeat timeout) started one more parallel reconnect loop, each closing the other's socket
+     * and scheduling another. The device ended up in a permanent close/reconnect cycle: it looked
+     * registered on the dashboard but never held a tunnel, which is exactly "it does not come back
+     * up on its own". Only the current generation may reconnect or report disconnection.
+     */
+    @Volatile private var sessionGeneration = 0
+    @Volatile private var deviceId: String? = null
     @Volatile private var isConnected = false
     @Volatile private var shouldReconnect = true
     @Volatile private var isReconnecting = false
@@ -138,6 +152,10 @@ class RelayConnection(
         if (!scope.isActive) {
             scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         }
+        // This dial is the current session from here on. The generation is taken BEFORE the old
+        // socket is closed, so the close callbacks it is about to deliver (which carry the old
+        // generation) are recognised as stale and ignored -- see sessionGeneration.
+        val generation = ++sessionGeneration
         // Close any existing connection before reconnecting
         webSocket?.close(1000, "Reconnecting")
         webSocket = null
@@ -152,6 +170,12 @@ class RelayConnection(
 
         webSocket = client.newWebSocket(request, object : WebSocketListener() {
             override fun onOpen(webSocket: WebSocket, response: Response) {
+                if (generation != sessionGeneration) {
+                    // A newer dial superseded this socket before it opened; close it quietly.
+                    DebugLogger.d("Ignoring onOpen from a superseded session")
+                    webSocket.close(1000, "Superseded")
+                    return
+                }
                 DebugLogger.i("WebSocket connected!")
                 isConnected = true
                 reconnectAttempt = 0  // Reset on successful connection
@@ -160,11 +184,12 @@ class RelayConnection(
                 scope.launch {
                     fetchPublicIp()
                     sendDeviceInfo()
-                    startHeartbeat()
+                    startHeartbeat(generation)
                 }
             }
 
             override fun onMessage(webSocket: WebSocket, text: String) {
+                if (generation != sessionGeneration) return
                 handleMessage(text)
             }
 
@@ -174,6 +199,7 @@ class RelayConnection(
             // bytes-flowing path. We dispatch to the binary handler
             // without any JSON parse or base64 decode.
             override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
+                if (generation != sessionGeneration) return
                 handleBinaryMessage(bytes)
             }
 
@@ -183,11 +209,22 @@ class RelayConnection(
 
             override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                 DebugLogger.d("WebSocket closed: $code - $reason")
+                if (generation != sessionGeneration) {
+                    // The socket WE closed to make way for a newer dial. Not a disconnect.
+                    DebugLogger.d("Ignoring onClosed from a superseded session")
+                    return
+                }
                 handleDisconnect()
             }
 
             override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
                 DebugLogger.e("WebSocket failure: ${t.message}", t)
+                if (generation != sessionGeneration) {
+                    // Closing the previous socket reports here as a failure on the old generation.
+                    // Reconnecting from it would stack a second loop on top of the live one.
+                    DebugLogger.d("Ignoring onFailure from a superseded session")
+                    return
+                }
                 handleDisconnect()
             }
         })
@@ -726,11 +763,13 @@ class RelayConnection(
         }
     }
 
-    private fun startHeartbeat() {
+    private fun startHeartbeat(generation: Int) {
         scope.launch {
-            while (isConnected) {
+            // A superseded session's heartbeat must stop: it would keep pinging a relay the
+            // current session is not connected to, and its `isConnected` read is shared state.
+            while (isConnected && generation == sessionGeneration) {
                 delay(HEARTBEAT_INTERVAL)
-                if (isConnected) {
+                if (isConnected && generation == sessionGeneration) {
                     sendMessage("heartbeat", mapOf("timestamp" to System.currentTimeMillis()))
                 }
             }
@@ -738,6 +777,14 @@ class RelayConnection(
     }
 
     private fun handleDisconnect() {
+        // A disconnect after the user turned sharing off (or after disconnect()) is not a
+        // disconnection to report or to recover from -- the socket is being torn down on purpose.
+        if (!shouldReconnect) {
+            DebugLogger.d("Ignoring disconnect: sharing is off")
+            isConnected = false
+            return
+        }
+
         isConnected = false
         // Force a clean re-handshake of the binary protocol on reconnect —
         // we'd never want to send binary frames to a relay that hasn't
@@ -784,6 +831,10 @@ class RelayConnection(
         isConnected = false
         isReconnecting = false
         reconnectAttempt = 0
+        // Supersede the session so any callback already queued on OkHttp's dispatcher (a late
+        // onFailure for the socket we are about to close) is ignored rather than reporting a
+        // disconnect after the user asked for sharing to stop.
+        sessionGeneration++
 
         // Close all active tunnels
         activeTunnels.keys.toList().forEach { closeTunnel(it) }

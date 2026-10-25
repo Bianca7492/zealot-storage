@@ -17,10 +17,10 @@ plugins {
     id("maven-publish")
 }
 
-// Version comes from the release tag in CI (-PzealotSdkVersion=1.4.0) or from gradle.properties;
+// Version comes from the release tag in CI (-PzealotSdkVersion=1.5.0) or from gradle.properties;
 // a plain checkout keeps the default there so IDE sync and `./gradlew assemble` work without a tag.
 val zealotSdkVersion: String =
-    (project.findProperty("zealotSdkVersion") as String?)?.trim()?.takeIf { it.isNotEmpty() } ?: "1.4.0"
+    (project.findProperty("zealotSdkVersion") as String?)?.trim()?.takeIf { it.isNotEmpty() } ?: "1.5.0"
 
 group = "com.zealot"
 version = zealotSdkVersion
