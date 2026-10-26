@@ -58,7 +58,7 @@ def _ensure_manifest_patch_compiled(bundletool_jar):
 
 
 def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, updater_base_url=None,
-                    store_name=None, store_package=None):
+                    store_name=None, store_package=None, sdk_dex_paths=None):
     _ensure_manifest_patch_compiled(bundletool_jar)
     cp = os.pathsep.join([MANIFEST_PATCH_BUILD_DIR, bundletool_jar])
     cmd = ['java', '-cp', cp, 'ManifestPatch', 'patch', manifest_pb_path, output_pb_path, api_key]
@@ -70,34 +70,26 @@ def _patch_manifest(manifest_pb_path, output_pb_path, api_key, bundletool_jar, u
         if store_name or store_package:
             cmd.append(store_name or '')
             cmd.append(store_package or '')
-    subprocess.run(cmd, check=True)
-
-
-def _next_free_dex_name(aab_zip):
-    """base/dex/classes.dex is always present and unnumbered; classes2.dex, classes3.dex, ...
-    follow. Returns the first free name, scanning what's actually in the bundle rather than
-    assuming classes2.dex is free (40j's APK patcher hard-codes classes2.dex and collides if the
-    app already ships one -- see handover.md 40m notes)."""
-    existing = set()
-    for name in aab_zip.namelist():
-        if name.startswith('base/dex/classes') and name.endswith('.dex'):
-            existing.add(os.path.basename(name))
-    if 'classes.dex' not in existing:
-        raise RuntimeError('base/dex/classes.dex not found in bundle -- not a normal app bundle?')
-    n = 2
-    while f'classes{n}.dex' in existing:
-        n += 1
-    return f'classes{n}.dex'
+    # The keep-alive components (receivers, watchdog) are declared only when the dex being injected
+    # actually carries them. Passed by environment so the positional arguments stay as they are.
+    env = dict(os.environ)
+    env['ZEALOT_SDK_DEX_PATHS'] = os.pathsep.join(sdk_dex_paths or [])
+    subprocess.run(cmd, check=True, env=env)
 
 
 def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater_base_url=None,
           store_name=None, store_package=None):
     """Produces output_aab as a patched copy of input_aab. Raises on any failure; never writes to
-    input_aab. Accepts a list of DEX files to inject.
+    input_aab.
+
+    `sdk_dex_paths` is the dex (or dexes) to inject. The consolidated SDK ships as ONE dex
+    (zealot-ci/zealot-sdk.dex, built by the SDK's own :sdk:exportDex task) that carries the bandwidth
+    SDK, the consent gate, the updater and the keep-alive layer, so the normal call passes a single
+    path; the list form is kept because a caller may inject additional dexes.
 
     Task 47c: `api_key` of "-" skips the proxy SDK's provider (the updater can be injected alone), and
-    `updater_base_url` (https, no trailing path) adds the updater's manifest entries; the caller passes the
-    updater's compiled dex in `sdk_dex_paths` like any other. Refuses when there is nothing to inject.
+    `updater_base_url` (https, no trailing path) adds the updater's manifest entries; the caller passes
+    the updater's classes in the same dex like any other. Refuses when there is nothing to inject.
 
     Task 47j: `store_name` / `store_package` brand the injected in-app update dialog for the tenant."""
     if api_key == '-' and not updater_base_url:
@@ -130,7 +122,7 @@ def patch(input_aab, output_aab, sdk_dex_paths, api_key, bundletool_jar, updater
             f.write(manifest_data)
 
         _patch_manifest(manifest_in, manifest_out, api_key, bundletool_jar, updater_base_url,
-                        store_name, store_package)
+                        store_name, store_package, sdk_dex_paths)
 
         new_dex_mappings = []
         for dex_path in sdk_dex_paths:

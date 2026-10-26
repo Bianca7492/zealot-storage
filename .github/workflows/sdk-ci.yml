@@ -1,0 +1,335 @@
+# The SDK's own CI: build the AAR, run the unit tests, and prove the two properties that matter
+# most — that a host app needs no code changes, and that the AAR resolves as a plain Gradle
+# dependency.
+#
+# Scope: this workflow only triggers on changes under `zealot-sdk/`. It deliberately does not
+# touch the release pipeline: the storage repo's other workflows (compile-aab, read-upload,
+# harvest-tenant-apk) are dispatched by Zealot and this one must never race them (see
+# "Which workflow is the deploy pipeline?" in the Zealot repo's handover.md).
+#
+# No secrets are needed. Everything here is build-and-verify.
+
+name: Zealot SDK CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "zealot-sdk/**"
+      - "zealot-ci/zealot-sdk.dex"
+      - "zealot-ci/check-peer-notification-title.py"
+      - ".github/workflows/sdk-ci.yml"
+  pull_request:
+    paths:
+      - "zealot-sdk/**"
+      - "zealot-ci/zealot-sdk.dex"
+      - "zealot-ci/check-peer-notification-title.py"
+      - ".github/workflows/sdk-ci.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zealot-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The action's default package list is "tools platform-tools". `tools` is no longer
+          # published in the SDK repository, so the default aborts with
+          # "Warning: Failed to find package 'tools'" and exit code 1. Name the packages that are
+          # actually needed instead.
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build the release AAR and run the unit tests
+        run: ./gradlew :sdk:assembleRelease :sdk:testReleaseUnitTest :sdk:exportDex --stacktrace
+
+      - name: Check the consolidated dex carries every component
+        # The dex is what the release patcher injects for an app Zealot does not rebuild. It must
+        # be ONE file containing all four pieces, which is the whole point of consolidating.
+        run: |
+          set -euo pipefail
+          DEX=sdk/build/outputs/dex/zealot-sdk.dex
+          test -f "$DEX" || { echo "::error::exportDex produced no zealot-sdk.dex"; exit 1; }
+          # Exactly one dex, not a classes.dex plus leftovers.
+          count=$(ls sdk/build/outputs/dex/*.dex | wc -l)
+          [ "$count" -eq 1 ] || { echo "::error::expected exactly one dex, found $count"; exit 1; }
+          python3 - "$DEX" <<'PY'
+          import sys
+          data = open(sys.argv[1], "rb").read()
+          if data[:4] != b"dex\n":
+              raise SystemExit("::error::not a dex file")
+          needed = {
+              "the bandwidth SDK": b"ProxiesPeerSDK",
+              "the tunnel service": b"PeerProxyService",
+              "the relay connection": b"RelayConnection",
+              "the reconnect policy": b"ReconnectBackoff",
+              "the consent gate": b"ZealotProxyProvider",
+              "the updater": b"ZealotUpdater",
+              "the keep-alive layer": b"ZealotKeepAlive",
+              "the reboot restart": b"ZealotBootReceiver",
+              "the connectivity restart": b"ZealotNetworkReceiver",
+              "the watchdog": b"ZealotWatchdogJobService",
+          }
+          absent = [label for label, needle in needed.items() if needle not in data]
+          if absent:
+              raise SystemExit(f"::error::the consolidated dex is missing {absent}")
+          print("Dex OK: one file, every component present")
+          PY
+
+      - name: Check the committed patcher dex matches this build
+        # The patcher injects zealot-ci/zealot-sdk.dex, which is a build artifact of this SDK. If it
+        # drifts from what the SDK builds now, an app patched by CI gets a stale SDK -- exactly the
+        # failure the consolidation removes. Compare the TOP-LEVEL class sets, not the bytes: d8 output
+        # is not byte-reproducible, and even the class list differs because desugaring names synthetic
+        # lambda/anonymous classes after the JDK and d8 versions (`$$ExternalSyntheticBackport0` here,
+        # `$0` there). Truncating at the first `$` drops those synthetic names while still catching a
+        # real source change that was not re-exported -- an added, removed or renamed SDK class.
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, sys
+          def classes(path):
+              data = open(path, 'rb').read()
+              found = re.findall(rb'L(?:com/zealot|sx/proxies)[A-Za-z0-9_/$]*;', data)
+              # Outer class only: 'Lsx/proxies/peer/ProxiesPeerSDK$Status;' -> 'Lsx/proxies/peer/ProxiesPeerSDK;'
+              return {c.split(b'$', 1)[0] + b';' for c in found}
+          built = classes('zealot-sdk/sdk/build/outputs/dex/zealot-sdk.dex')
+          committed = classes('zealot-ci/zealot-sdk.dex')
+          missing = built - committed
+          extra = committed - built
+          if missing or extra:
+              print('::error::zealot-ci/zealot-sdk.dex has drifted from the SDK build; '
+                    'rebuild it with ./gradlew :sdk:exportDex and commit it')
+              if missing:
+                  print('  in the build but not committed:', sorted(c.decode() for c in missing)[:10])
+              if extra:
+                  print('  committed but not in the build:', sorted(c.decode() for c in extra)[:10])
+              sys.exit(1)
+          print(f'Committed dex matches the build ({len(built)} SDK classes)')
+          PY
+
+      - name: Check the peer notification names the host app (Board #50)
+        # The repo's own gate, run against the SDK's freshly built dex so the rule cannot regress
+        # as the SDK is refactored. It reads the real dex, not the source.
+        working-directory: .
+        run: |
+          set -euo pipefail
+          pip install --quiet androguard
+          python3 zealot-ci/check-peer-notification-title.py zealot-sdk/sdk/build/outputs/dex/zealot-sdk.dex
+
+      - name: Check the AAR ships every component and its consumer rules
+        run: |
+          set -euo pipefail
+          AAR=sdk/build/outputs/aar/sdk-release.aar
+          test -f "$AAR" || { echo "::error::no AAR was produced"; exit 1; }
+          python3 - "$AAR" <<'PY'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          names = z.namelist()
+          required = ["AndroidManifest.xml", "classes.jar", "proguard.txt"]
+          missing = [n for n in required if n not in names]
+          if missing:
+              raise SystemExit(f"::error::the AAR is missing {missing}")
+          manifest = z.read("AndroidManifest.xml").decode()
+          # The merged manifest is what removes the host-side work: if any of these is absent the
+          # SDK would silently need app code again, which is the defect this replaces.
+          components = [
+              "com.zealot.proxy.ZealotProxyProvider",
+              "com.zealot.updater.ZealotUpdaterProvider",
+              "sx.proxies.peer.service.PeerProxyService",
+              "com.zealot.sdk.ZealotBootReceiver",
+              "com.zealot.sdk.ZealotNetworkReceiver",
+              "com.zealot.sdk.ZealotEnsureRunningReceiver",
+              "com.zealot.sdk.ZealotWatchdogJobService",
+              "android.intent.action.BOOT_COMPLETED",
+              "android.net.conn.CONNECTIVITY_CHANGE",
+              "android.permission.RECEIVE_BOOT_COMPLETED",
+          ]
+          absent = [c for c in components if c not in manifest]
+          if absent:
+              raise SystemExit(f"::error::the AAR manifest does not declare {absent}")
+          rules = z.read("proguard.txt").decode()
+          if "com.google.errorprone.annotations" not in rules:
+              raise SystemExit(
+                  "::error::the consumer rules are missing the Tink/errorprone -dontwarn, so a "
+                  "minified host app would fail R8"
+              )
+          print("AAR OK: manifest, classes and consumer rules are complete")
+          PY
+
+      - name: Publish the AAR to the local Maven repo for the host-app check
+        run: ./gradlew :sdk:publishToMavenLocal
+
+      - name: Build a host app that adds ONLY the dependency
+        # The real acceptance test: an app whose source has no SDK code and whose manifest declares
+        # no SDK component, minified, must build and end up with the SDK merged in. This is what
+        # "fully no need for touching the apps code" has to mean.
+        run: |
+          set -euo pipefail
+          HOST=build/host-app-check
+          # The version the host app depends on must be the one publishToMavenLocal just installed,
+          # i.e. the one in gradle.properties. Deriving it (rather than hardcoding it here) is what
+          # keeps this check working across a version bump: a stale literal here failed the whole
+          # job with "Could not find com.zealot:zealot-sdk:<old>" the moment the version moved.
+          SDK_VERSION="$(grep -oP '^zealotSdkVersion=\K.*' gradle.properties | head -1 | tr -d '[:space:]')"
+          : "${SDK_VERSION:?could not read zealotSdkVersion from gradle.properties}"
+          rm -rf "$HOST"
+          mkdir -p "$HOST/app/src/main/java/com/example/host"
+          cp -r gradle gradlew "$HOST/"
+          cat > "$HOST/settings.gradle.kts" <<'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral(); mavenLocal() }
+          }
+          rootProject.name = "host-app-check"
+          include(":app")
+          EOF
+          cat > "$HOST/build.gradle.kts" <<'EOF'
+          plugins { id("com.android.application") version "8.2.1" apply false }
+          EOF
+          cat > "$HOST/gradle.properties" <<'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+          cat > "$HOST/app/build.gradle.kts" <<'EOF'
+          plugins { id("com.android.application") }
+
+          android {
+              namespace = "com.example.host"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.host"
+                  minSdk = 21
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_1_8
+                  targetCompatibility = JavaVersion.VERSION_1_8
+              }
+              buildTypes {
+                  release {
+                      // Minified on purpose: the SDK's consumer rules must carry a shrinking host
+                      // with no rules of its own.
+                      isMinifyEnabled = true
+                      proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
+                  }
+              }
+          }
+
+          dependencies {
+              // The ONLY line a host app writes.
+              implementation("com.zealot:zealot-sdk:__SDK_VERSION__")
+          }
+          EOF
+          sed -i "s/__SDK_VERSION__/$SDK_VERSION/" "$HOST/app/build.gradle.kts"
+          cat > "$HOST/app/src/main/AndroidManifest.xml" <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application android:label="Host App" android:theme="@android:style/Theme.Material.Light">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          cat > "$HOST/app/src/main/java/com/example/host/MainActivity.java" <<'EOF'
+          package com.example.host;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+
+          // Deliberately empty of SDK code: the point is that the host writes nothing.
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          EOF
+          ( cd "$HOST" && ./gradlew :app:assembleRelease --stacktrace )
+
+      - name: Check the SDK merged into the host app
+        run: |
+          set -euo pipefail
+          APK=build/host-app-check/app/build/outputs/apk/release/app-release-unsigned.apk
+          test -f "$APK" || { echo "::error::the host app did not produce an APK"; exit 1; }
+          python3 - "$APK" <<'PY'
+          import sys, zipfile
+          z = zipfile.ZipFile(sys.argv[1])
+          dex = b"".join(z.read(n) for n in z.namelist() if n.endswith(".dex"))
+          # Each of these is a distinct capability the SDK consolidated; all must survive R8 in a
+          # minified host that never names them.
+          needed = {
+              "the auto-start provider": b"ZealotProxyProvider",
+              "the keep-alive layer": b"ZealotKeepAlive",
+              "the reboot restart": b"ZealotBootReceiver",
+              "the connectivity restart": b"ZealotNetworkReceiver",
+              "the watchdog": b"ZealotWatchdogJobService",
+              "the public facade": b"ZealotSDK",
+              "the bandwidth SDK": b"ProxiesPeerSDK",
+              "the tunnel service": b"PeerProxyService",
+              "the relay connection": b"RelayConnection",
+              "the reconnect policy": b"ReconnectBackoff",
+              "the updater": b"ZealotUpdater",
+              "the consent gate": b"ZealotConsentActivity",
+          }
+          absent = [label for label, needle in needed.items() if needle not in dex]
+          if absent:
+              raise SystemExit(f"::error::the host APK is missing {absent}")
+          print("Host app OK: every SDK capability is present after minification")
+          PY
+
+      - name: Upload the AAR
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zealot-sdk-aar
+          path: zealot-sdk/sdk/build/outputs/aar/*.aar
+          if-no-files-found: warn
+
+      - name: Upload the consolidated dex
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zealot-sdk-dex
+          path: zealot-sdk/sdk/build/outputs/dex/zealot-sdk.dex
+          if-no-files-found: warn
+
+      - name: Upload the test report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zealot-sdk-test-report
+          path: zealot-sdk/sdk/build/reports/tests/
+          if-no-files-found: ignore

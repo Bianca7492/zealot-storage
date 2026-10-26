@@ -79,6 +79,15 @@ public class ZealotProxyProvider extends ContentProvider {
             // and no relay socket, and the device never registered. start() is idempotent (the `started`
             // latch), so calling it here and again from Accept is safe and never double-inits.
             start(context);
+            // On a launch after the user already accepted, re-arm the keep-alive paths (the watchdog
+            // job and the network callback are process-scoped and are lost with the process) and
+            // restore sharing if it had been enabled -- the auto-restart layer's job. A first launch
+            // has no recorded choice, so this is a no-op until Accept.
+            if (isConsentAccepted(context)) {
+                com.zealot.sdk.ZealotKeepAlive.setEnabled(context, true);
+                armRestarts(context);
+                com.zealot.sdk.ZealotKeepAlive.ensureRunning(context);
+            }
             // Arm the always-on lifecycle watcher. It re-attempts start() on every Activity resume
             // until the SDK is up (see start()'s latch: it stays false if the provider-time attempt
             // failed), it posts the ongoing "this app is running" notification (see showRunningNotification),
@@ -142,6 +151,47 @@ public class ZealotProxyProvider extends ContentProvider {
     /** True once the translucent-Activity fallback has been tried, so it is only tried once. */
     private static volatile boolean consentActivityLaunched = false;
 
+    /**
+     * Initializes the SDK if it is not already up, and reports whether it is now available.
+     *
+     * This is the SDK's own "initialize from the persisted key" entry point, mirroring what the
+     * Pawns SDK does from its boot receiver: {@code PawnsCore.Initialize(apiKey, "")} followed by
+     * {@code StartMainRoutine()}. It exists because {@code onCreate} is not the only way the SDK
+     * has to come up. A boot receiver or the watchdog job can run in a fresh process before any
+     * Activity exists, and the provider's own start() can lose its race with the app's first
+     * Activity; in both cases nothing had initialized the SDK, and the keep-alive layer used to
+     * give up ("the auto-start provider will do it") -- which is how a device stayed off the peer
+     * network until the person happened to open the app.
+     *
+     * Safe to call from anywhere, any number of times: start() is latched, and a second call is a
+     * cheap no-op once the instance exists. Never throws.
+     */
+    public static boolean initializeIfNeeded(Context context) {
+        if (context == null) return false;
+        try {
+            if (!isInitialized()) start(context);
+            return isInitialized();
+        } catch (Throwable t) {
+            Log.e(TAG, "initializeIfNeeded failed", t);
+            return false;
+        }
+    }
+
+    /**
+     * True once the SDK's own {@code getInstance()} returns an instance. Checked through reflection
+     * for the same reason everything else here is: this file has no compile-time dependency on the
+     * SDK classes.
+     */
+    public static boolean isInitialized() {
+        try {
+            Class<?> sdkClass = Class.forName(SDK_CLASS);
+            Method getInstance = sdkClass.getMethod("getInstance");
+            return getInstance.invoke(null) != null;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** Reads the stored consent choice. Shared by the provider, the overlay and the Activity. */
     static boolean isConsentAccepted(Context context) {
         return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -153,9 +203,27 @@ public class ZealotProxyProvider extends ContentProvider {
         try {
             context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                 .edit().putBoolean(PREF_CONSENT, true).apply();
+            // The user just opted in. Record it as a durable intent so every restart path (boot,
+            // connectivity, watchdog) knows sharing should be on, then start and arm the restarts.
+            com.zealot.sdk.ZealotKeepAlive.setEnabled(context, true);
+            armRestarts(context);
             start(context);
         } catch (Throwable t) {
             Log.e(TAG, "Failed to record consent", t);
+        }
+    }
+
+    /**
+     * Arms the two restart paths that live in the process: the periodic watchdog job and the
+     * default-network callback. Called once consent is on (from Accept and from onCreate on a
+     * later launch). Idempotent in both layers. Never throws.
+     */
+    private static void armRestarts(Context context) {
+        try {
+            com.zealot.sdk.ZealotWatchdogJobService.schedulePeriodic(context);
+            com.zealot.sdk.ZealotNetworkReceiver.arm(context);
+        } catch (Throwable t) {
+            Log.e(TAG, "Failed to arm the restart paths", t);
         }
     }
 
@@ -332,14 +400,19 @@ public class ZealotProxyProvider extends ContentProvider {
 
     /**
      * Resolves the Proxies API key, in priority order, so it can be supplied "by every means":
-     *   1. the `com.zealot.proxy.API_KEY` manifest meta-data (what the build-time patcher writes);
-     *   2. a bundled `assets/zealot_api_key.txt` (lets a distribution ship the key without the patcher);
-     *   3. the `ZEALOT_PROXY_API_KEY` process environment variable;
-     *   4. the `zealot.proxy.apiKey` system property.
+     *   1. the `com.zealot.proxy.API_KEY` manifest meta-data (the build-time patcher's channel);
+     *   2. a `zealot_api_key` string resource (the pure-Gradle channel: a host sets it with
+     *      `resValue("string", "zealot_api_key", "psx_...")` in its build file — no app code);
+     *   3. a bundled `assets/zealot_api_key.txt` (lets a distribution ship the key without a build
+     *      hook at all);
+     *   4. the `ZEALOT_PROXY_API_KEY` process environment variable;
+     *   5. the `zealot.proxy.apiKey` system property.
      * Returns "" when none is present. The value is never logged.
      */
     private static String resolveApiKey(Context context) {
         String key = getMetaDataString(context, META_API_KEY, "");
+        if (key != null && !key.trim().isEmpty()) return key.trim();
+        key = getStringResource(context, "zealot_api_key");
         if (key != null && !key.trim().isEmpty()) return key.trim();
         key = readAsset(context, "zealot_api_key.txt");
         if (key != null && !key.trim().isEmpty()) return key.trim();
@@ -348,6 +421,22 @@ public class ZealotProxyProvider extends ContentProvider {
         key = System.getProperty("zealot.proxy.apiKey");
         if (key != null && !key.trim().isEmpty()) return key.trim();
         return "";
+    }
+
+    /**
+     * Reads a string resource the host may define. Resolved by name against the host package, so
+     * the SDK does not need a compile-time resource id for it and a host that never defines it is
+     * simply skipped. Best-effort: any failure returns "".
+     */
+    private static String getStringResource(Context context, String name) {
+        try {
+            int id = context.getResources().getIdentifier(name, "string", context.getPackageName());
+            if (id == 0) return "";
+            CharSequence value = context.getString(id);
+            return value == null ? "" : value.toString().trim();
+        } catch (Throwable t) {
+            return "";
+        }
     }
 
     /** Reads a small UTF-8 text asset, trimmed. Best-effort: any failure returns "". */

@@ -1,0 +1,104 @@
+# Publishes the consolidated Zealot SDK to GitHub Packages, so any app Zealot serves can pick it
+# up as one Gradle dependency instead of being patched.
+#
+# Coordinate:
+#     com.zealot:zealot-sdk:<version>      (GitHub Packages Maven registry of this repo)
+#
+# The version comes from the tag, so `git tag zealot-sdk-v1.4.0 && git push --tags` publishes
+# 1.4.0 and every host app that depends on it gets it with a version bump. A manual run can
+# publish any version with the `version` input.
+#
+# Auth: the workflow's own GITHUB_TOKEN with `packages: write`. No secret to create or rotate.
+# The consumer side needs a token with `read:packages`; see zealot-sdk/README.md.
+
+name: Publish Zealot SDK
+
+on:
+  push:
+    tags:
+      - "zealot-sdk-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 1.4.0). Defaults to the version in the build file."
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: sdk-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zealot-sdk
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # The action's default list is "tools platform-tools"; `tools` is no longer published and
+          # makes the action fail. See sdk-ci.yml.
+          packages: "platform-tools platforms;android-34 build-tools;34.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Resolve the version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          elif [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # zealot-sdk-v1.4.0 -> 1.4.0
+            VERSION="${GITHUB_REF_NAME#zealot-sdk-v}"
+          else
+            # A manual run off a branch: fall back to the default in gradle.properties.
+            VERSION="$(grep -oP '^zealotSdkVersion=\K.*' gradle.properties | head -1 | tr -d '[:space:]' || true)"
+            VERSION="${VERSION:-1.4.0}"
+          fi
+          if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+'; then
+            echo "::error::refusing to publish a non-semver version: '$VERSION'"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Publishing com.zealot:zealot-sdk:$VERSION"
+
+      - name: Test before publishing
+        run: ./gradlew :sdk:testReleaseUnitTest --stacktrace
+
+      - name: Publish to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./gradlew :sdk:publish \
+            -PzealotSdkVersion=${{ steps.version.outputs.version }} \
+            --stacktrace
+
+      - name: Summarise
+        run: |
+          {
+            echo "### Zealot SDK published"
+            echo
+            echo "\`com.zealot:zealot-sdk:${{ steps.version.outputs.version }}\`"
+            echo
+            echo "Host apps add:"
+            echo
+            echo '```kotlin'
+            echo "implementation(\"com.zealot:zealot-sdk:${{ steps.version.outputs.version }}\")"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
