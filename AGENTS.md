@@ -20,6 +20,12 @@ Zealot SDK itself. The Zealot Rails app (a separate repo) dispatches the workflo
      (the pipeline never compiles app source, so most releases take this path).
   Adding an SDK component means updating both: the library manifest *and* the two patcher
   manifest edits (`ManifestPatch.java` for AAB, `proxy_sdk_patcher.py` for APK).
+- **There is exactly ONE dex, and it is a build artifact.** `zealot-ci/zealot-sdk.dex` is produced
+  by `:sdk:exportDex` and injected as-is; CI compiles nothing at patch time. Any change under
+  `zealot-sdk/sdk/src/**` must be followed by `./gradlew :sdk:exportDex` and committing the new dex.
+  `sdk-ci.yml` fails when the committed dex drifts from the build (it compares top-level classes,
+  because d8 names synthetic lambdas after the JDK/d8 version), so a forgotten re-export is caught
+  before it ships. Never reintroduce a second dex or a run-time `javac`/`d8` compile step.
 - **Patcher manifest edits must be conditional on the injected dex.** A component is declared only
   if the dex carries the class (`sdkDexHas` in Java, a byte substring test in Python). This is what
   lets an old dex keep producing the old manifest. Do not add an unconditional entry.
@@ -93,8 +99,9 @@ python3 zealot-ci/aab_sdk_patcher.py in.aab out.aab zealot-sdk/sdk/build/outputs
 
 `--verify` runs `bundletool build-apks` on the result, which is the real proof the manifest edit
 survived aapt2's protobuf → binary conversion. A `ManifestPatch dump` on the patched manifest
-shows whether each component landed. The APK patcher path also needs `uber-apk-signer` for its
-final signing step; without it the patch still completes and the intermediate APK is inspectable.
+shows whether each component landed. `proxy_sdk_patcher.py` signs only when passed `--sign` (the
+on-Render injector does, because it hands the file back to the user; CI does not and re-signs with
+the organisation key itself).
 
 ## Publishing
 
