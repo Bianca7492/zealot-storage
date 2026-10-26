@@ -156,42 +156,26 @@ jobs:
           sparse-checkout: zealot-ci
           path: storage-repo
 
-      - name: Compile ZealotProxyProvider
+      - name: Check the consolidated SDK dex is present
+        # No compile step here any more. The provider, the consent Activity, the consent overlay, the
+        # bandwidth SDK, the updater and the keep-alive layer are all in the one committed dex, built by the
+        # SDK's own `:sdk:exportDex` task. The old flow compiled the three consent classes with javac + d8 on
+        # every run; that is exactly the step that could "succeed" while producing a dex the patcher could not
+        # use, so it is gone rather than fixed.
         run: |
           set -euo pipefail
-          mkdir -p "$WORK/zealot_provider"
-          # The consent sheet is a SECOND class in the same dex, not part of ZealotProxyProvider.java.
-          # It was left out of this workflow while read-upload.yml compiled it, so a harvested tenant
-          # built here injected a provider that names com.zealot.proxy.ZealotConsentActivity in the
-          # manifest but shipped no such class: opening the app hit NoClassDefFoundError when the
-          # provider tried to start the sheet, the provider swallowed it (its onCreate is guarded) and
-          # the consent screen never appeared. Compile both, or the sheet cannot be shown.
-          for f in ZealotProxyProvider.java ZealotConsentActivity.java ZealotConsentOverlay.java; do
-            [[ -s "storage-repo/zealot-ci/$f" ]] || { echo "::error::zealot-ci/$f must be committed to the storage repo"; exit 1; }
-            cp "storage-repo/zealot-ci/$f" "$WORK/zealot_provider/"
-          done
-          android_jar="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-*/android.jar | sort -V | tail -n 1)"
-          javac -source 1.8 -target 1.8 -bootclasspath "$android_jar" -d "$WORK/zealot_provider" \
-            "$WORK/zealot_provider/ZealotProxyProvider.java" "$WORK/zealot_provider/ZealotConsentActivity.java" \
-            "$WORK/zealot_provider/ZealotConsentOverlay.java"
-          d8_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/d8 | sort -V | tail -n 1)"
-          "$d8_path" --min-api 21 --output "$WORK/zealot_provider" \
-            "$WORK/zealot_provider/com/zealot/proxy/ZealotProxyProvider.class" \
-            "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentActivity.class" \
-            "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentOverlay.class"
-          # d8 always writes "classes.dex" into --output; there is no flag to name it (same fix as read-upload.yml).
-          [[ -s "$WORK/zealot_provider/classes.dex" ]] || { echo "::error::d8 produced no classes.dex for ZealotProxyProvider"; exit 1; }
-          mv "$WORK/zealot_provider/classes.dex" "$WORK/zealot_provider/zealot_provider.dex"
-          # Fail if either class is missing: the manifest patch declares the provider AND the consent
-          # Activity it starts, so a dex without the Activity ships a named-but-absent component and
-          # the consent sheet silently never appears (the bug this step's consent compile fixes).
-          dex="$WORK/zealot_provider/zealot_provider.dex"
+          sdk_dex=storage-repo/zealot-ci/zealot-sdk.dex
+          [[ -s $sdk_dex ]] || { echo "::error::zealot-ci/zealot-sdk.dex must be committed to the storage repo (build it with the SDK's :sdk:exportDex task)"; exit 1; }
+          # Fail here, before any patching, if the dex does not actually carry the components the manifest
+          # patch will declare -- a named-but-absent component crashes the app at launch.
           dexdump_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/dexdump | sort -V | tail -n 1)"
-          classes="$("$dexdump_path" -f "$dex" | grep -o "Lcom/zealot/proxy/[A-Za-z]*;" | sort -u)"
-          for c in com/zealot/proxy/ZealotProxyProvider com/zealot/proxy/ZealotConsentActivity com/zealot/proxy/ZealotConsentOverlay; do
-            grep -q "L$c;" <<<"$classes" || { echo "::error::$c missing from $dex (manifest declares it)"; exit 1; }
+          classes="$("$dexdump_path" -f "$sdk_dex" | grep -o 'L\(com/zealot/proxy\|com/zealot/sdk\|com/zealot/updater\|sx/proxies/peer\)/[A-Za-z]*;' | sort -u)"
+          for c in com/zealot/proxy/ZealotProxyProvider com/zealot/proxy/ZealotConsentActivity \
+                   com/zealot/proxy/ZealotConsentOverlay com/zealot/sdk/ZealotKeepAlive \
+                   sx/proxies/peer/ProxiesPeerSDK; do
+            grep -q "L$c;" <<<"$classes" || { echo "::error::$c missing from $sdk_dex (the manifest declares it)"; exit 1; }
           done
-          echo "ZEALOT_PROVIDER_DEX=$WORK/zealot_provider/zealot_provider.dex" >> "$GITHUB_ENV"
+          echo "SDK_DEX=$sdk_dex" >> "$GITHUB_ENV"
 
       - name: Inject the SDK
         env:
@@ -200,13 +184,13 @@ jobs:
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
           ci=storage-repo/zealot-ci
-          for f in aab_sdk_patcher.py aab_manifest_patch/ManifestPatch.java proxies_sdk.dex; do
+          for f in aab_sdk_patcher.py aab_manifest_patch/ManifestPatch.java zealot-sdk.dex; do
             [[ -s $ci/$f ]] || fail "zealot-ci/$f must be committed to the storage repo"
           done
           before="$(sha256sum "$AAB_PATH" | cut -d' ' -f1)"
           out="$WORK/patched.aab"
           BUNDLETOOL_JAR="$HOME/bundletool/bundletool.jar" \
-            python3 "$ci/aab_sdk_patcher.py" "$AAB_PATH" "$out" "$ci/proxies_sdk.dex" "${ZEALOT_PROVIDER_DEX}" "$PROXIES_API_KEY"
+            python3 "$ci/aab_sdk_patcher.py" "$AAB_PATH" "$out" "$ci/zealot-sdk.dex" "$PROXIES_API_KEY"
           [[ -s $out ]] || fail "the patcher produced no bundle"
           after="$(sha256sum "$AAB_PATH" | cut -d' ' -f1)"
           [[ $after == "$before" ]] || fail "the clean bundle changed while a copy was patched; nothing was uploaded"

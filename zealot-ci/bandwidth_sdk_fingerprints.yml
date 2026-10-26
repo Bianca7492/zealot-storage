@@ -9,7 +9,7 @@
 # Python dependency, since the dex string pool is already plain UTF-8 and a substring match is enough for a
 # flag-for-review signal (not a legal or forensic claim).
 #
-# "confidence: confirmed" -- read directly from a real dex file this repo ships (proxies_sdk.dex) with
+# "confidence: confirmed" -- read directly from a real dex file this repo ships (zealot-sdk.dex) with
 # androguard, Task 40n-a/40n session. "confidence: unverified" -- the package prefix is the vendor's publicly
 # documented or conventionally-expected Android namespace; NO real APK/AAB containing that SDK was decompiled
 # in this sandbox to confirm it (no network access to fetch a sample, none was supplied). Treat every

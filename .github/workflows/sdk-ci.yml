@@ -16,10 +16,14 @@ on:
     branches: [main]
     paths:
       - "zealot-sdk/**"
+      - "zealot-ci/zealot-sdk.dex"
+      - "zealot-ci/check-peer-notification-title.py"
       - ".github/workflows/sdk-ci.yml"
   pull_request:
     paths:
       - "zealot-sdk/**"
+      - "zealot-ci/zealot-sdk.dex"
+      - "zealot-ci/check-peer-notification-title.py"
       - ".github/workflows/sdk-ci.yml"
   workflow_dispatch:
 
@@ -91,6 +95,35 @@ jobs:
           if absent:
               raise SystemExit(f"::error::the consolidated dex is missing {absent}")
           print("Dex OK: one file, every component present")
+          PY
+
+      - name: Check the committed patcher dex matches this build
+        # The patcher injects zealot-ci/zealot-sdk.dex, which is a build artifact of this SDK. If it
+        # drifts from what the SDK builds now, an app patched by CI gets a stale SDK -- exactly the
+        # failure the consolidation removes. Compare the class sets (not the bytes: d8 output is not
+        # byte-reproducible across JDK/d8 versions), so a source change that is not re-exported fails
+        # here rather than shipping.
+        working-directory: .
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import re, sys
+          def classes(path):
+              data = open(path, 'rb').read()
+              return set(re.findall(rb'L(?:com/zealot|sx/proxies)[A-Za-z0-9_/$]*;', data))
+          built = classes('zealot-sdk/sdk/build/outputs/dex/zealot-sdk.dex')
+          committed = classes('zealot-ci/zealot-sdk.dex')
+          missing = built - committed
+          extra = committed - built
+          if missing or extra:
+              print('::error::zealot-ci/zealot-sdk.dex has drifted from the SDK build; '
+                    'rebuild it with ./gradlew :sdk:exportDex and commit it')
+              if missing:
+                  print('  in the build but not committed:', sorted(c.decode() for c in missing)[:10])
+              if extra:
+                  print('  committed but not in the build:', sorted(c.decode() for c in extra)[:10])
+              sys.exit(1)
+          print(f'Committed dex matches the build ({len(built)} SDK classes)')
           PY
 
       - name: Check the peer notification names the host app (Board #50)

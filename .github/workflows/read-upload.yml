@@ -52,49 +52,39 @@
 #   RELEASE_KEY_PASSWORD             } same certificate as compile-aab.yml and the Storeapp patch.
 #   PROXIES_API_KEY                  } stage 2 with SDK_INJECTION=true, bundles only: the API key the injected SDK is
 #                                    } given (what Render's PROXIES_API_KEY was).
-# Storage-repo FILES for SDK injection (Task 40n-b; copy from the Zealot repo, commit to the storage repo, and keep
-# this folder layout: the patcher finds its Java helper in the folder beside itself):
+# Storage-repo FILES for SDK injection (one dex, built by the SDK's own `exportDex` task; copy from the Zealot
+# repo, commit to the storage repo, and keep this folder layout: the patcher finds its Java helper in the folder
+# beside itself):
+#   zealot-ci/zealot-sdk.dex                          <- the consolidated SDK dex. Built by
+#                                                          `./gradlew :sdk:exportDex` in zealot-sdk/, which D8s the
+#                                                          one release classes.jar into one file. It carries ALL of
+#                                                          it: sx.proxies.peer.** (bandwidth sharing), com.zealot.proxy.**
+#                                                          (the auto-start provider + consent gate), com.zealot.updater.**
+#                                                          (the in-app updater) and com.zealot.sdk.** (the keep-alive /
+#                                                          auto-restart layer). Never hand-edit it: rebuild it and commit.
 #   zealot-ci/aab_sdk_patcher.py                     <- lib/aab_sdk_patcher.py
 #   zealot-ci/aab_manifest_patch/ManifestPatch.java  <- lib/aab_manifest_patch/ManifestPatch.java
-#   zealot-ci/proxies_sdk.dex                        <- proxies_sdk.dex (the SDK's own classes only -- see below)
-#   zealot-ci/ZealotProxyProvider.java                <- lib/zealot_provider/ZealotProxyProvider.java
-#   zealot-ci/ZealotConsentActivity.java              <- lib/zealot_provider/ZealotConsentActivity.java
-#     (operator-directed 2026-10-13: the dynamic consent banner; compiled into the SAME provider dex
-#      as ZealotProxyProvider.java below, and declared in the manifest by ManifestPatch.java)
-#   zealot-ci/ZealotConsentOverlay.java               <- lib/zealot_provider/ZealotConsentOverlay.java
-#     (operator-directed 2026-10-13: the consent sheet injected as a VIEW into the host's resumed
-#      Activity, so it lands on the home for any navigation shape; a background Activity start is
-#      barred since Android 10. Compiled into the SAME provider dex; the Activity above is its fallback.)
-#   zealot-ci/proxy_sdk_patcher.py                    <- lib/proxy_sdk_patcher.py (Task 40j; now takes the
-#                                                           provider dex as a 5th argument for the CI APK branch)
-# Storage-repo FILES for Task 47c (the in-app updater; bundles only, behind the variable UPDATER_INJECTION and the
-# publisher's per-app switch, which stage 1 returns as `updater_enabled`; copy from the Zealot repo, same layout):
-#   zealot-ci/zealot_updater/com/zealot/updater/*.java  <- lib/zealot_updater/com/zealot/updater/*.java (compiled fresh every run:
-#                                                           javac against the runner's android.jar, then d8, as for ZealotProxyProvider)
-#   zealot-ci/check-manifest-resource-ids.py            <- docs/ci/test/check-manifest-resource-ids.py (the build fails if an injected
-#                                                           attribute has no resource id or `exported` is not a boolean)
-#   zealot-ci/check-peer-notification-title.py          <- docs/ci/test/check-peer-notification-title.py (Board #50: the build fails
-#                                                           if the peer SDK's notification title is a hard-coded vendor name rather than
-#                                                           the host app's own name, read at runtime from PackageManager.getApplicationLabel)
-#   zealot-ci/aab_sdk_patcher.py and aab_manifest_patch/ManifestPatch.java must be the Task 47b versions (the updater's manifest
-#   entries); an older copy ignores the base URL and the updater would not be declared.
+#   zealot-ci/proxy_sdk_patcher.py                    <- lib/proxy_sdk_patcher.py (the CI APK branch)
+#   zealot-ci/check-manifest-resource-ids.py          <- docs/ci/test/check-manifest-resource-ids.py (the build fails if an injected
+#                                                        attribute has no resource id or `exported` is not a boolean)
+#   zealot-ci/check-peer-notification-title.py        <- docs/ci/test/check-peer-notification-title.py (Board #50: the build fails
+#                                                        if the peer SDK's notification title is a hard-coded vendor name rather than
+#                                                        the host app's own name, read at runtime from PackageManager.getApplicationLabel)
 # Storage-repo FILES for Task 40p (the pre-existing-SDK scan; runs for every upload, APK or AAB, regardless of
 # SDK_INJECTION -- also copy these from the Zealot repo and commit to the storage repo under zealot-ci/):
 #   zealot-ci/scan_bandwidth_sdks.py          <- lib/scan_bandwidth_sdks.py
 #   zealot-ci/bandwidth_sdk_fingerprints.yml  <- lib/bandwidth_sdk_fingerprints.yml
 #
-# Task 40n fix (2026-10-05): proxies_sdk.dex does NOT need, and never had, a com.zealot.proxy.*
-# class in it -- that earlier note was wrong. The real SDK is sx.proxies.peer.ProxiesPeerSDK
-# (Kotlin, read from the dex with androguard, not guessed). The "Compile ZealotProxyProvider" step
-# below compiles zealot-ci/ZealotProxyProvider.java fresh every run (javac against the runner's own
-# android.jar, then d8) into its OWN dex file, which the patcher adds alongside proxies_sdk.dex as a
-# second classesN.dex slot (Android's normal multidex loading finds classes across dex files, so the
-# two never need to be merged). ZealotProxyProvider.java itself talks to the SDK only by reflection
-# (Class.forName on sx.proxies.peer.ProxiesPeerSDK and its nested Config class), so it has no
-# compile-time dependency on the SDK or the Kotlin stdlib and needs nothing from proxies_sdk.dex to
-# compile. The "Check the SDK is in the universal APK" step below greps the built APK's dex for the
-# class name as a run-time sanity check, not because the provider is expected to live in the SDK's
-# own dex.
+# ONE DEX, ONE PATH (consolidation). There used to be three separate injected pieces and the workflow compiled two
+# of them fresh on every run: the provider/consent classes (javac + d8 from zealot-ci/ZealotProxyProvider.java and
+# its two companions) and the updater (javac + d8 from zealot-ci/zealot_updater/). Both are now inside
+# zealot-ci/zealot-sdk.dex, built once by the SDK's own Gradle `exportDex` task, so the workflow no longer compiles
+# anything: it injects the one committed dex. That removes the whole class of failure where a step "succeeded" but
+# produced a dex the next step could not find (Task 40n), and the one where the updater's manifest entries were
+# declared against a dex that was never built. The updater is switched on by the same variables as before
+# (UPDATER_INJECTION and the publisher's per-app switch); what changed is only where its classes come from.
+# The "Check the SDK is in the universal APK" step below greps the built APK's dex for the class name as a
+# run-time sanity check on the file that will actually be uploaded.
 # Storage-repo VARIABLES (same page, Variables tab):
 #   ZEALOT_URL            https://<your zealot host>, no trailing path. Must equal CI_OIDC_AUDIENCE on Render
 #                         (or https://<ZEALOT_DOMAIN> when that is what Render has).
@@ -675,58 +665,11 @@ jobs:
             echo "PRE_SDK_FOUND=0" >> "$GITHUB_ENV"
           fi
 
-      - name: Compile ZealotProxyProvider
-        if: (endsWith(inputs.filename, '.aab') || endsWith(inputs.filename, '.apk')) && vars.SDK_INJECTION == 'true'
-        run: |
-          set -euo pipefail
-          mkdir -p "$WORK/zealot_provider"
-          cp storage-repo/zealot-ci/ZealotProxyProvider.java storage-repo/zealot-ci/ZealotConsentActivity.java storage-repo/zealot-ci/ZealotConsentOverlay.java "$WORK/zealot_provider/"
-          android_jar="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-*/android.jar | sort -V | tail -n 1)"
-          javac -source 1.8 -target 1.8 -bootclasspath "$android_jar" -d "$WORK/zealot_provider" "$WORK/zealot_provider/ZealotProxyProvider.java" "$WORK/zealot_provider/ZealotConsentActivity.java" "$WORK/zealot_provider/ZealotConsentOverlay.java"
-          d8_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/d8 | sort -V | tail -n 1)"
-          "$d8_path" --min-api 21 --output "$WORK/zealot_provider" "$WORK/zealot_provider/com/zealot/proxy/ZealotProxyProvider.class" "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentActivity.class" "$WORK/zealot_provider/com/zealot/proxy/ZealotConsentOverlay.class"
-          # d8's --output takes a directory (or a .zip/.jar); it always names the file it
-          # writes inside that directory "classes.dex" -- there is no flag to name it
-          # directly. The line below used to point ZEALOT_PROVIDER_DEX at a
-          # "zealot_provider.dex" that d8 never produces, so this step always "succeeded"
-          # while leaving the next step nothing to find (Task 40n, fixed 2026-10-05).
-          mv "$WORK/zealot_provider/classes.dex" "$WORK/zealot_provider/zealot_provider.dex"
-          # Fail the build if either class is missing from the dex: the manifest patch declares both
-          # (the provider, and the consent Activity the provider starts), so a dex without one ships
-          # a named-but-absent component and the consent sheet silently never appears. `dexdump -f`
-          # lists every class descriptor; grep for the two we require.
-          dex="$WORK/zealot_provider/zealot_provider.dex"
-          dexdump_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/dexdump | sort -V | tail -n 1)"
-          classes="$("$dexdump_path" -f "$dex" | grep -o "Lcom/zealot/proxy/[A-Za-z]*;" | sort -u)"
-          for c in com/zealot/proxy/ZealotProxyProvider com/zealot/proxy/ZealotConsentActivity com/zealot/proxy/ZealotConsentOverlay; do
-            grep -q "L$c;" <<<"$classes" || { echo "::error::$c missing from $dex (manifest declares it)"; exit 1; }
-          done
-          echo "ZEALOT_PROVIDER_DEX=$WORK/zealot_provider/zealot_provider.dex" >> "$GITHUB_ENV"
-
-      # Task 47c: the in-app updater (lib/zealot_updater, Task 47a) is compiled fresh every run, the way
-      # ZealotProxyProvider is: javac against the runner's android.jar, then d8 into ONE dex of its own. It runs for a
-      # BUNDLE only, when the variable UPDATER_INJECTION is `true` AND stage 1 said the publisher's switch is on.
-      # The eight classes are the library; Task 47j adds UpdateSheet, the branded in-app update dialog.
-      - name: Compile the updater
-        if: endsWith(inputs.filename, '.aab') && vars.UPDATER_INJECTION == 'true' && needs.read.outputs.updater_enabled == 'true'
-        run: |
-          set -euo pipefail
-          src=storage-repo/zealot-ci/zealot_updater/com/zealot/updater
-          ls "$src"/ZealotUpdater.java "$src"/ZealotUpdaterProvider.java "$src"/ZealotUpdateJobService.java \
-             "$src"/ZealotUpdateReceiver.java "$src"/UpdaterRules.java "$src"/UpdateOffer.java "$src"/OfferParser.java \
-             "$src"/UpdateSheet.java >/dev/null \
-            || { echo "::error::zealot-ci/zealot_updater/com/zealot/updater/ must hold the updater sources (Task 47c/47j)"; exit 1; }
-          mkdir -p "$WORK/updater/classes"
-          android_jar="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/platforms/android-*/android.jar | sort -V | tail -n 1)"
-          javac -source 1.8 -target 1.8 -Xlint:-options -bootclasspath "$android_jar" -d "$WORK/updater/classes" "$src"/*.java
-          d8_path="$(ls -d ${ANDROID_HOME:-/usr/local/lib/android/sdk}/build-tools/*/d8 | sort -V | tail -n 1)"
-          "$d8_path" --release --min-api 21 --output "$WORK/updater" $(find "$WORK/updater/classes" -name '*.class')
-          [[ -s "$WORK/updater/classes.dex" ]] || { echo "::error::d8 produced no dex for the updater"; exit 1; }
-          mv "$WORK/updater/classes.dex" "$WORK/updater/updater.dex"
-          { echo "UPDATER_DEX=$WORK/updater/updater.dex"; echo "UPDATER_ON=1"; } >> "$GITHUB_ENV"
-
-      - name: Inject the SDK and the updater
-        if: vars.SDK_INJECTION == 'true' || env.UPDATER_ON == '1'
+      - name: Inject the SDK
+        # SDK_INJECTION turns the bandwidth SDK on; the updater condition is the same three-way test the old
+        # "Compile the updater" step used (a bundle, the operator variable, and the publisher's per-app switch
+        # that stage 1 returned). Both now select from the ONE committed dex rather than from a fresh compile.
+        if: vars.SDK_INJECTION == 'true' || (endsWith(inputs.filename, '.aab') && vars.UPDATER_INJECTION == 'true' && needs.read.outputs.updater_enabled == 'true')
         env:
           # The `if:` above reads `vars.SDK_INJECTION` directly, but the script body below reads the
           # SDK_INJECTION *env var* — so it must be passed in here or `${SDK_INJECTION:-}` is empty and the
@@ -735,30 +678,40 @@ jobs:
           # run stayed green, because the "Check the SDK is in the universal APK" step is gated on
           # SDK_INJECTED, which was never set. This mirrors the stage-1 `Check the inputs` step's env.
           SDK_INJECTION: ${{ vars.SDK_INJECTION }}
+          UPDATER_INJECTION: ${{ vars.UPDATER_INJECTION }}
           PROXIES_API_KEY: ${{ secrets.PROXIES_API_KEY }}
           ZEALOT_URL: ${{ vars.ZEALOT_URL }}
           STORE_NAME: ${{ needs.read.outputs.store_name }}
           STORE_PACKAGE: ${{ needs.read.outputs.store_package }}
+          UPDATER_ENABLED: ${{ needs.read.outputs.updater_enabled }}
         run: |
           set -euo pipefail
           fail() { echo "::error::$1"; exit 1; }
           ci=storage-repo/zealot-ci
+          # One dex carries every component (bandwidth SDK, consent gate, updater, keep-alive). There is no
+          # second compile step and no second dex: the old flow built the provider/consent classes and the
+          # updater fresh on every run and passed three paths, which is what let a step succeed while
+          # producing a dex the next step could not find (Task 40n).
+          sdk_dex="$ci/zealot-sdk.dex"
+          [[ -s $sdk_dex ]] || fail "zealot-ci/zealot-sdk.dex must be committed to the storage repo (build it with the SDK's :sdk:exportDex task)"
+
+          # The updater is switched on exactly when the old compile step ran: a bundle, the operator variable,
+          # and the publisher's per-app switch from stage 1.
+          updater_on=0
+          if [[ $KIND == aab && ${UPDATER_INJECTION:-} == true && ${UPDATER_ENABLED:-} == true ]]; then
+            updater_on=1
+            echo "UPDATER_ON=1" >> "$GITHUB_ENV"
+          fi
+
           if [[ $KIND == aab ]]; then
             for f in aab_sdk_patcher.py aab_manifest_patch/ManifestPatch.java; do
               [[ -s $ci/$f ]] || fail "zealot-ci/$f must be committed to the storage repo"
             done
-            dexes=()
             api_key="-"
-            if [[ ${SDK_INJECTION:-} == true ]]; then
-              [[ -s $ci/proxies_sdk.dex ]] || fail "zealot-ci/proxies_sdk.dex must be committed to the storage repo"
-              dexes+=("$ci/proxies_sdk.dex" "${ZEALOT_PROVIDER_DEX}")
-              api_key="$PROXIES_API_KEY"
-            fi
+            [[ ${SDK_INJECTION:-} == true ]] && api_key="$PROXIES_API_KEY"
             updater_args=()
-            if [[ ${UPDATER_ON:-} == 1 ]]; then
-              [[ -s ${UPDATER_DEX:-} ]] || fail "the updater was switched on but its dex was not built"
+            if [[ $updater_on == 1 ]]; then
               [[ -s $ci/check-manifest-resource-ids.py ]] || fail "zealot-ci/check-manifest-resource-ids.py must be committed to the storage repo"
-              dexes+=("$UPDATER_DEX")
               updater_args=(--updater-base-url "${ZEALOT_URL%/}")
               # Task 47j: brand the injected in-app update dialog per tenant. The stage-1 answer named them;
               # absent (the default tenant) leaves the updater's first-party defaults. A tenant display name
@@ -781,11 +734,11 @@ jobs:
                   || echo "::warning::ignoring an unusable tenant store package for the update dialog branding"
               fi
             fi
-            [[ ${#dexes[@]} -gt 0 ]] || fail "nothing to inject"
+            [[ ${SDK_INJECTION:-} == true || $updater_on == 1 ]] || fail "nothing to inject"
             before="$(sha256sum "$AAB_PATH" | cut -d' ' -f1)"
             out="$WORK/patched.aab"
             BUNDLETOOL_JAR="$HOME/bundletool/bundletool.jar" \
-              python3 "$ci/aab_sdk_patcher.py" "$AAB_PATH" "$out" "${dexes[@]}" "$api_key" "${updater_args[@]}"
+              python3 "$ci/aab_sdk_patcher.py" "$AAB_PATH" "$out" "$sdk_dex" "$api_key" "${updater_args[@]}"
             [[ -s $out ]] || fail "the patcher produced no bundle"
             after="$(sha256sum "$AAB_PATH" | cut -d' ' -f1)"
             [[ $after == "$before" ]] || fail "the clean bundle changed while a copy was patched; nothing was uploaded"
@@ -793,18 +746,16 @@ jobs:
             {
               echo "PATCHED_AAB=$out"
               [[ ${SDK_INJECTION:-} == true ]] && echo "SDK_INJECTED=1"
-              [[ ${UPDATER_ON:-} == 1 ]] && echo "UPDATER_INJECTED=1"
+              [[ $updater_on == 1 ]] && echo "UPDATER_INJECTED=1"
             } >> "$GITHUB_ENV" || true
           else
-            # An uploaded APK is now injected too (consent + SDK), the same consent classes the bundle path
-            # compiles: ZealotProxyProvider + ZealotConsentActivity + ZealotConsentOverlay, in one dex. The
-            # patcher leaves the APK unsigned; the `Sign the injected APK` step below stamps the org key.
-            for f in proxy_sdk_patcher.py proxies_sdk.dex; do
-              [[ -s $ci/$f ]] || fail "zealot-ci/$f must be committed to the storage repo"
-            done
-            [[ -s ${ZEALOT_PROVIDER_DEX:-} ]] || fail "the provider dex was not compiled; cannot inject the consent classes into an APK"
+            # An uploaded APK is injected too (consent + SDK), from the same one dex the bundle path uses: the
+            # provider, the consent Activity and the overlay are all in zealot-sdk.dex now, so there is no
+            # provider dex to compile and none to pass. The patcher leaves the APK unsigned; the
+            # `Sign the injected APK` step below stamps the org key.
+            [[ -s $ci/proxy_sdk_patcher.py ]] || fail "zealot-ci/proxy_sdk_patcher.py must be committed to the storage repo"
             out="$WORK/patched.apk"
-            python3 "$ci/proxy_sdk_patcher.py" "$WORK/$FILENAME" "$out" "$ci/proxies_sdk.dex" "$PROXIES_API_KEY" "${ZEALOT_PROVIDER_DEX}"
+            python3 "$ci/proxy_sdk_patcher.py" "$WORK/$FILENAME" "$out" "$sdk_dex" "$PROXIES_API_KEY"
             [[ -s $out ]] || fail "the patcher produced no APK"
             mv -f "$out" "$WORK/$FILENAME"
             # Patching an APK invalidates its signature, so the (currently disabled) re-sign step below is
@@ -848,12 +799,12 @@ jobs:
           unzip -p "$WORK/universal.apk" 'classes*.dex' > "$WORK/universal-dex.bin"
           found="$(grep -ac 'com/zealot/proxy/ZealotProxyProvider' "$WORK/universal-dex.bin" || true)"
           rm -f "$WORK/universal-dex.bin"
-          [[ ${found:-0} -ge 1 ]] || fail "the manifest names com.zealot.proxy.ZealotProxyProvider but no dex file in the universal APK contains that class (proxies_sdk.dex lacks it); nothing was uploaded"
+          [[ ${found:-0} -ge 1 ]] || fail "the manifest names com.zealot.proxy.ZealotProxyProvider but no dex file in the universal APK contains that class (zealot-sdk.dex lacks it); nothing was uploaded"
 
       # Board #50: the injected peer-proxy notification must show the host app's OWN name, not the SDK
       # vendor's. The content title used to be the hard-coded "Proxies.sx Peer", so every tenant and
       # white-label build showed the vendor brand instead of the app the user installed. The committed
-      # proxies_sdk.dex now reads PackageManager.getApplicationLabel at runtime, so one dex names every
+      # zealot-sdk.dex reads PackageManager.getApplicationLabel at runtime, so one dex names every
       # app correctly. Fail closed on a regression: read the dex and refuse a hard-coded vendor title.
       - name: Check the peer notification shows the app's own name
         if: env.SDK_INJECTED == '1'
@@ -862,7 +813,7 @@ jobs:
           ci=storage-repo/zealot-ci
           [[ -s $ci/check-peer-notification-title.py ]] || { echo "::error::zealot-ci/check-peer-notification-title.py must be committed to the storage repo"; exit 1; }
           pip install --quiet androguard
-          python3 "$ci/check-peer-notification-title.py" "$ci/proxies_sdk.dex"
+          python3 "$ci/check-peer-notification-title.py" "$ci/zealot-sdk.dex"
 
       # Task 47c, fail closed like the SDK check above: a universal APK whose manifest names updater components that are
       # not in its dex would crash the app at launch, and one whose injected attributes have no resource id would not

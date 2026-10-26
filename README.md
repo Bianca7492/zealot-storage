@@ -5,7 +5,7 @@ Zealot release file storage
 
 | Path | What it is |
 |---|---|
-| `zealot-ci/` | The original release-time patchers and the pieces they inject (`proxies_sdk.dex`, the consent and updater classes). Kept for apps built before the SDK existed. |
+| `zealot-ci/` | The release-time patchers and the ONE dex they inject (`zealot-sdk.dex`, built by the SDK's own `:sdk:exportDex` task). There are no separate consent or updater sources any more: they live in the SDK and ship inside that dex. |
 | `zealot-sdk/` | **The consolidated Zealot SDK.** One Android library (AAR) carrying the bandwidth-sharing SDK, the consent gate, the in-app updater and the keep-alive layer. Host apps add one Gradle dependency and write no SDK code. See [`zealot-sdk/README.md`](zealot-sdk/README.md). |
 | `.github/workflows/compile-aab.yml` | Zealot-dispatched: builds the device-split and universal APKs from a release AAB. |
 | `.github/workflows/read-upload.yml` | Zealot-dispatched: the upload/build pipeline. |

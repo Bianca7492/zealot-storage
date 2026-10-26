@@ -14,9 +14,9 @@ permission are declared in the library's manifest and merged into the host at bu
 
 | Capability | Package | Was, before this SDK |
 |---|---|---|
-| Bandwidth sharing / peer proxy | `sx.proxies.peer.**` | `zealot-ci/proxies_sdk.dex`, injected into the APK |
-| Consent gate | `com.zealot.proxy.**` | `zealot-ci/ZealotProxyProvider.java` etc., dex-injected + manifest-patched |
-| In-app updater | `com.zealot.updater.**` | `zealot-ci/zealot_updater/**`, dex-injected |
+| Bandwidth sharing / peer proxy | `sx.proxies.peer.**` | a separate `proxies_sdk.dex`, injected into the APK |
+| Consent gate | `com.zealot.proxy.**` | `ZealotProxyProvider.java` etc. compiled fresh each run, dex-injected + manifest-patched |
+| In-app updater | `com.zealot.updater.**` | `zealot_updater/**` compiled fresh each run, dex-injected |
 | Auto-restart / keep-alive | `com.zealot.sdk.**` | did not exist |
 | Public facade | `com.zealot.sdk.ZealotSDK` | did not exist |
 
@@ -160,9 +160,9 @@ sdk/build/outputs/dex/zealot-sdk.dex
 ```
 
 That single file already contains the bandwidth SDK, the consent gate, the updater and the
-keep-alive layer. The patcher injects one dex instead of the three separate pieces
-(`proxies_sdk.dex` plus the hand-patched consent and updater classes) it used to carry, and the
-consolidation is what lets the same artifact serve both paths.
+keep-alive layer. The patcher injects that one dex -- it no longer compiles the consent or updater
+classes itself, and there is no second dex. Commit it to `zealot-ci/zealot-sdk.dex` and CI checks it
+has not drifted from the SDK build.
 
 The task runs automatically after `assembleRelease`, and CI checks that the dex contains every
 component.
