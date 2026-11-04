@@ -133,3 +133,23 @@ commit, not the upstream history.
 
 `bolivian-peru/android-peer-sdk` is a **separate, live** upstream and is not part of this
 account; do not migrate or repoint it.
+
+## Injecting the SDK into an already-built APK
+
+`zealot-ci/proxy_sdk_patcher.py` decompiles with apktool, adds the manifest components, rebuilds and
+drops in the consolidated `zealot-sdk.dex`. Two things trip the rebuild on real store APKs, and the
+patcher handles both:
+
+- `res/xml/_generated_res_locale_config.xml` references `android:defaultLocale`, a framework
+  attribute the build-tools in use do not know. It is generated at build time and no code reads it,
+  so `_prepare_for_rebuild` deletes it.
+- A layout may reference an attribute the app's own resource table never declared (apktool decodes a
+  library attribute, e.g. Glance's `glance_isTopLevelLayout`, into a custom-namespace reference).
+  `_rebuild` reads apktool's own "attribute X not found" diagnostics, declares each as a boolean in
+  `res/values/attrs.xml`, and retries. A new attribute name cannot move an existing resource id.
+
+Install the **official apktool jar** (`iBotPeaches/Apktool`), not the distro package: the Debian
+package cannot find its bundled `aapt` and fails on every rebuild. The publisher workflow does this.
+
+After patching, confirm the APK kept every resource id it shipped with (`aapt2 dump resources` on the
+original vs the patched file) — that is what catches a rebuild that silently renumbered resources.
