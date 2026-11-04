@@ -56,6 +56,58 @@ def _verify_dex(dex_bytes):
             + ' -- rebuild it with the SDK\'s :sdk:exportDex task')
 
 
+def _prepare_for_rebuild(app_dir):
+    """Removes the decoded leftovers that stop a few apps from recompiling.
+
+    ``res/xml/_generated_res_locale_config.xml`` references ``android:defaultLocale``, a framework
+    attribute the build-tools in use do not know; the file is generated at build time and no code
+    reads it, so dropping it lets the link proceed.
+    """
+    generated = os.path.join(app_dir, 'res', 'xml', '_generated_res_locale_config.xml')
+    if os.path.exists(generated):
+        os.remove(generated)
+        print("[*] Removed the generated locale-config file that blocks a rebuild")
+
+
+def _declare_missing_attrs(app_dir, names):
+    """Declares attributes a layout references but the app's own table never defined.
+
+    apktool decodes a library attribute (e.g. Glance's ``glance_isTopLevelLayout``) as a
+    custom-namespace reference the app's resource table lacks, and aapt2 then refuses to link it.
+    Declaring each as a boolean resolves the reference; as a new attribute name it cannot move any
+    existing resource id.
+    """
+    attrs_file = os.path.join(app_dir, 'res', 'values', 'attrs.xml')
+    if not os.path.exists(attrs_file) or not names:
+        return
+    with open(attrs_file) as f:
+        body = f.read()
+    added = ''.join(f'    <attr name="{n}" format="boolean"/>\n' for n in sorted(names))
+    with open(attrs_file, 'w') as f:
+        f.write(body.replace('</resources>', added + '</resources>'))
+    print(f"[*] Declared {len(names)} referenced-but-undeclared attribute(s) so the APK can recompile")
+
+
+def _rebuild(app_dir, output_file):
+    """Runs ``apktool b``, declaring any attribute the linker reports as missing and retrying.
+
+    The missing attributes come from apktool's own diagnostics, so this handles whatever a
+    particular app's resources reference without a hard-coded list.
+    """
+    for _ in range(8):
+        result = subprocess.run(['apktool', 'b', '-o', output_file, app_dir],
+                                capture_output=True, text=True)
+        if result.returncode == 0:
+            return
+        diag = result.stderr + result.stdout
+        missing = {m for m in re.findall(r'attribute (\S+) \(aka [^)]*\) not found', diag)
+                   if not m.startswith('android:')}
+        if not missing:
+            raise RuntimeError(diag.strip()[:500])
+        _declare_missing_attrs(app_dir, missing)
+    raise RuntimeError('apktool could not rebuild the APK after declaring its missing attributes')
+
+
 def _sign(output_file):
     """Signs the patched APK in place with uber-apk-signer (V1 & V2), zipaligning it.
 
@@ -128,6 +180,7 @@ def patch(input_file, output_file, sdk_dex_path, api_key, sign=False):
             print(f"[*] Decompiling APK: {target_apk}...")
             app_dir = os.path.join(work_dir, "app")
             subprocess.run(['apktool', 'd', '-f', target_apk, '-o', app_dir], check=True)
+            _prepare_for_rebuild(app_dir)
 
             manifest = os.path.join(app_dir, 'AndroidManifest.xml')
             with open(manifest, 'r') as f: data = f.read()
@@ -201,7 +254,7 @@ def patch(input_file, output_file, sdk_dex_path, api_key, sign=False):
             with open(manifest, 'w') as f: f.write(data)
 
             print("[*] Recompiling APK with the SDK's manifest components...")
-            subprocess.run(['apktool', 'b', '-o', output_file, app_dir], check=True)
+            _rebuild(app_dir, output_file)
 
             print("[*] Injecting the consolidated SDK dex...")
             # Next free classesN.dex slot, scanning what the rebuilt APK actually carries -- a hard-coded
